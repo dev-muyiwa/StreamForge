@@ -79,7 +79,11 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 	var vmafHasError bool
 	if w.config.Pipeline.VMAF.Enabled {
 		var wg sync.WaitGroup
-		vmafChan := make(chan VMAFResult, len(transcodeResults))
+		vmafChan := make(chan struct {
+			index  int
+			result VMAFResult
+		}, len(transcodeResults))
+
 		for i, tr := range transcodeResults {
 			if tr.Error != nil {
 				vmafResults[i] = VMAFResult{InputFile: localFilePath, OutputFile: tr.OutputPath, Error: tr.Error}
@@ -92,15 +96,18 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 				if err != nil {
 					vmafHasError = true
 				}
-				vmafChan <- *vmafResult
+				vmafChan <- struct {
+					index  int
+					result VMAFResult
+				}{i, *vmafResult}
 			}(i, tr.OutputPath)
 		}
 		go func() {
 			wg.Wait()
 			close(vmafChan)
 		}()
-		for vmafResult := range vmafChan {
-			vmafResults = append(vmafResults, vmafResult)
+		for vmafData := range vmafChan {
+			vmafResults[vmafData.index] = vmafData.result
 		}
 	}
 	result.VMAFResults = vmafResults
