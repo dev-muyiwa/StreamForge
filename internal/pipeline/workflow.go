@@ -52,8 +52,11 @@ func NewWorkflow(pipeline *Pipeline, transcoder *Transcoder, packager *Packager,
 func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key string) (*WorkflowResult, error) {
 	result := &WorkflowResult{}
 
+	// Generate epoch time for unique output folder
+	epochTime := time.Now().Unix()
+
 	// Step 1: Save uploaded file locally
-	w.logger.Info("Saving uploaded file locally", zap.String("key", key))
+	w.logger.Info("Saving uploaded file locally", zap.String("key", key), zap.Int64("epoch_time", epochTime))
 	localFilePath, err := w.saveFileLocally(ctx, inputFile, key)
 	if err != nil {
 		w.logger.Error("Failed to save file locally", zap.Error(err))
@@ -63,8 +66,8 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 
 	// Step 2: Transcode - Use local file path
 	transcodeStart := time.Now()
-	w.logger.Info("Starting transcode", zap.String("local_path", localFilePath))
-	transcodeResults, err := w.transcoder.Transcode(ctx, localFilePath, w.config.Transcode)
+	w.logger.Info("Starting transcode", zap.String("local_path", localFilePath), zap.Int64("epoch_time", epochTime))
+	transcodeResults, err := w.transcoder.Transcode(ctx, localFilePath, w.config.Transcode, epochTime)
 	if err != nil {
 		w.logger.Error("Some transcoding jobs failed", zap.Error(err), zap.Duration("duration", time.Since(transcodeStart)))
 	}
@@ -117,8 +120,8 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 
 	// Step 4: Package
 	packageStart := time.Now()
-	w.logger.Info("Starting packaging", zap.Int("input_count", len(transcodeOutputs)))
-	packageResults, err := w.packager.Package(ctx, transcodeOutputs, w.config.Package)
+	w.logger.Info("Starting packaging", zap.Int("input_count", len(transcodeOutputs)), zap.Int64("epoch_time", epochTime))
+	packageResults, err := w.packager.Package(ctx, transcodeOutputs, w.config.Package, epochTime)
 	if err != nil {
 		w.logger.Error("Some packaging jobs failed", zap.Error(err), zap.Duration("duration", time.Since(packageStart)))
 	}

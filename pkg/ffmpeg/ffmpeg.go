@@ -17,12 +17,9 @@ func NewFFmpeg(pathToBinary string) *FFmpeg {
 	return &FFmpeg{pathToBinary: pathToBinary}
 }
 
-func (f *FFmpeg) Transcode(ctx context.Context, inputFile string, config types.CodecConfig) (string, error) {
-	// Create output directory structure: outputs/key/resolution/
-	keyWithoutExt := filepath.Base(inputFile)
-	keyWithoutExt = keyWithoutExt[:len(keyWithoutExt)-len(filepath.Ext(keyWithoutExt))] // Remove extension
-
-	outputDir := filepath.Join("./outputs", keyWithoutExt, config.Resolution)
+func (f *FFmpeg) Transcode(ctx context.Context, inputFile string, config types.CodecConfig, epochTime int64) (string, error) {
+	// Create output directory structure: outputs/epoch_time/resolution/
+	outputDir := filepath.Join("./outputs", fmt.Sprintf("%d", epochTime), config.Resolution)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}

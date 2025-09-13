@@ -34,7 +34,7 @@ func NewTranscoder(ffmpegPath string, logger *zap.Logger, maxWorkers int32, retr
 	}
 }
 
-func (t *Transcoder) Transcode(ctx context.Context, inputFile string, configs []types.CodecConfig) ([]TranscodeResult, error) {
+func (t *Transcoder) Transcode(ctx context.Context, inputFile string, configs []types.CodecConfig, epochTime int64) ([]TranscodeResult, error) {
 	// Create outputs directory structure
 	outputsDir := "./outputs"
 	if err := os.MkdirAll(outputsDir, 0755); err != nil {
@@ -65,7 +65,7 @@ func (t *Transcoder) Transcode(ctx context.Context, inputFile string, configs []
 				var output string
 				err := Retry(ctx, t.logger, t.retry, fmt.Sprintf("transcode %s to %s", inputFile, config.Codec), func() error {
 					var err error
-					output, err = t.ffmpeg.Transcode(ctx, inputFile, config)
+					output, err = t.ffmpeg.Transcode(ctx, inputFile, config, epochTime)
 					return err
 				})
 				if err != nil {

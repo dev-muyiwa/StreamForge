@@ -38,7 +38,7 @@ func NewPackager(ffmpegPath string, logger *zap.Logger, maxWorkers int32, retryC
 	}
 }
 
-func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []types.PackageConfig) ([]PackageResult, error) {
+func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []types.PackageConfig, epochTime int64) ([]PackageResult, error) {
 	workerSemaphore := make(chan struct{}, p.maxWorkers)
 	results := make([]PackageResult, len(inputFiles)*len(configs))
 	var resultIdx int32
@@ -64,14 +64,11 @@ func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []t
 
 					var outputPath string
 					err := Retry(ctx, p.logger, p.retry, fmt.Sprintf("package %s to %s", inputFile, config.Format), func() error {
-						// Create output directory structure: outputs/key/resolution/package/
-						keyWithoutExt := filepath.Base(inputFile)
-						keyWithoutExt = keyWithoutExt[:len(keyWithoutExt)-len(filepath.Ext(keyWithoutExt))] // Remove extension
-
-						// Extract resolution from the input file path (e.g., from "outputs/video/720/output_720p.mp4")
+						// Create output directory structure: outputs/epoch_time/resolution/package/
+						// Extract resolution from the input file path (e.g., from "outputs/1234567890/720/video.mp4")
 						resolution := filepath.Base(filepath.Dir(inputFile))
 
-						outputDir := filepath.Join("./outputs", keyWithoutExt, resolution, "package")
+						outputDir := filepath.Join("./outputs", fmt.Sprintf("%d", epochTime), resolution, "package")
 						if err := os.MkdirAll(outputDir, 0755); err != nil {
 							return fmt.Errorf("failed to create package output directory: %w", err)
 						}

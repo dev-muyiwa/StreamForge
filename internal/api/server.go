@@ -7,6 +7,7 @@ import (
 	types "StreamForge/pkg"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -82,7 +83,8 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
-	results, err := s.transcoder.Transcode(r.Context(), req.InputFile, req.Configs)
+	epochTime := time.Now().Unix()
+	results, err := s.transcoder.Transcode(r.Context(), req.InputFile, req.Configs, epochTime)
 	if err != nil {
 		http.Error(w, "Some transcoding jobs failed", http.StatusInternalServerError)
 		return
@@ -106,7 +108,8 @@ func (s *Server) handlePackage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
-	results, err := s.packager.Package(r.Context(), req.InputFiles, req.Configs)
+	epochTime := time.Now().Unix()
+	results, err := s.packager.Package(r.Context(), req.InputFiles, req.Configs, epochTime)
 	if err != nil {
 		http.Error(w, "Some packaging jobs failed", http.StatusInternalServerError)
 		return
