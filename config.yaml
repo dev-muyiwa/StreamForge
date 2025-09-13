@@ -1,0 +1,41 @@
+pipeline:
+  max_workers: 4
+  ff_mpeg_path: "ffmpeg"  # or path to your ffmpeg binary
+  retry:
+    max_attempts: 3
+    initial_interval_sec: 1.0
+    backoff_coefficient: 2.0
+  vmaf:
+    enabled: false
+    min_score: 80.0
+    model_path: ""
+
+storage:
+  type: "local"  # options: local, s3
+#  s3:
+#    bucket: "your-bucket-name"
+#    region: "us-east-1"
+#    access_key_id: "your-access-key"
+#    secret_access_key: "your-secret-key"
+
+transcode:
+  - codec: "libx264"
+    bitrate: "1000k"
+    resolution: "720"
+    output_file: "output_720p.mp4"
+  - codec: "libx264"
+    bitrate: "500k"
+    resolution: "480"
+    output_file: "output_480p.mp4"
+
+package:
+  - format: "hls"
+    segment_duration: 10
+    llhls: false
+    output_path: "output/"
+
+plugins: []
+
+logging:
+  level: "info"
+  output: "console"
