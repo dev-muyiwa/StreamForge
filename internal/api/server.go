@@ -7,6 +7,8 @@ import (
 	types "StreamForge/pkg"
 	"encoding/json"
 	"net/http"
+
+	"go.uber.org/zap"
 )
 
 type Server struct {
@@ -50,8 +52,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	p := pipeline.NewPipeline(s.storage, nil, types.RetryConfig{})
-	result, err := p.Ingest(r.Context(), file, "your-bucket", "video.mp4")
+
+	// Create a logger for the pipeline
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+
+	p := pipeline.NewPipeline(logger, types.RetryConfig{})
+	result, err := p.Ingest(r.Context(), file, "input", "video.mp4")
 	if err != nil {
 		http.Error(w, "Upload failed", http.StatusInternalServerError)
 		return
@@ -122,12 +129,9 @@ func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	bucket := r.FormValue("bucket")
-	if s.cfg.Storage.Type == "s3" {
-		bucket = s.cfg.Storage.S3.Bucket // From config
-	} else {
-		bucket = s.cfg.Storage.Local.BasePath
-	}
+	// For input, we always use a local bucket/key structure for organization
+	// The actual storage type only affects where outputs are stored
+	bucket := "input" // Local input bucket
 	key := r.FormValue("key")
 	if key == "" {
 		key = "video.mp4" // Default todo(make unique)

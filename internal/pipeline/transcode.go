@@ -5,9 +5,11 @@ import (
 	"StreamForge/pkg/ffmpeg"
 	"context"
 	"fmt"
-	"go.uber.org/zap"
+	"os"
 	"sync"
 	"sync/atomic"
+
+	"go.uber.org/zap"
 )
 
 type TranscodeResult struct {
@@ -33,6 +35,12 @@ func NewTranscoder(ffmpegPath string, logger *zap.Logger, maxWorkers int32, retr
 }
 
 func (t *Transcoder) Transcode(ctx context.Context, inputFile string, configs []types.CodecConfig) ([]TranscodeResult, error) {
+	// Create outputs directory structure
+	outputsDir := "./outputs"
+	if err := os.MkdirAll(outputsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create outputs directory: %w", err)
+	}
+
 	workerSemaphore := make(chan struct{}, t.maxWorkers)
 	results := make([]TranscodeResult, len(configs))
 	var resultIdx int32

@@ -4,7 +4,6 @@ type CodecConfig struct {
 	Codec      string `mapstructure:"codec" json:"codec"`
 	Bitrate    string `mapstructure:"bitrate" json:"bitrate"`
 	Resolution string `mapstructure:"resolution" json:"resolution"`
-	OutputFile string `mapstructure:"output_file" json:"output_file"`
 }
 
 type PackageConfig struct {

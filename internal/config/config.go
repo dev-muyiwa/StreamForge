@@ -2,9 +2,10 @@ package config
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
-	"strings"
 )
 
 type ConfigLoader struct {
@@ -88,9 +89,7 @@ func (cl *ConfigLoader) validate(cfg *Config) error {
 			return fmt.Errorf("bucket required for %s", storage)
 		}
 	case "local":
-		if cfg.Storage.Local.BasePath == "" {
-			cfg.Storage.Local.BasePath = "./output" // Default
-		}
+		// No base_path required for local storage since we use outputs folder directly
 	default:
 		return fmt.Errorf("invalid storage backend: %s", storage)
 	}
@@ -107,9 +106,6 @@ func (cl *ConfigLoader) validate(cfg *Config) error {
 		}
 		if tc.Resolution == "" {
 			return fmt.Errorf("resolution required for codec: %s", tc.Codec)
-		}
-		if tc.OutputFile == "" {
-			return fmt.Errorf("output_file required for codec: %s", tc.Codec)
 		}
 	}
 

@@ -28,12 +28,16 @@ func main() {
 		logger.Fatal("Failed to load config", zap.Error(err))
 	}
 
-	storageImpl, err := storage.NewStorage(cfg.Storage)
-	if err != nil {
-		logger.Fatal("Failed to init storage", zap.Error(err))
+	var storageImpl storage.Storage
+	if cfg.Storage.Type != "local" {
+		var err error
+		storageImpl, err = storage.NewStorage(cfg.Storage)
+		if err != nil {
+			logger.Fatal("Failed to init storage", zap.Error(err))
+		}
 	}
 
-	pipeLine := pipeline.NewPipeline(storageImpl, logger, cfg.Pipeline.Retry)
+	pipeLine := pipeline.NewPipeline(logger, cfg.Pipeline.Retry)
 	transcoder := pipeline.NewTranscoder(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.MaxWorkers, cfg.Pipeline.Retry)
 	packager := pipeline.NewPackager(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.MaxWorkers, cfg.Pipeline.Retry)
 	monitor := pipeline.NewMonitor(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.VMAF, cfg.Pipeline.Retry)

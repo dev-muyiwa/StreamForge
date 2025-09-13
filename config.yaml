@@ -22,17 +22,15 @@ transcode:
   - codec: "libx264"
     bitrate: "1000k"
     resolution: "720"
-    output_file: "output_720p.mp4"
   - codec: "libx264"
     bitrate: "500k"
     resolution: "480"
-    output_file: "output_480p.mp4"
 
 package:
   - format: "hls"
     segment_duration: 10
     llhls: false
-    output_path: "output/"
+    output_path: "playlist.m3u8"
 
 plugins: []
 

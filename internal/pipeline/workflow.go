@@ -5,11 +5,13 @@ import (
 	"StreamForge/internal/pipeline/storage"
 	"context"
 	"fmt"
-	"go.uber.org/zap"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type Workflow struct {
@@ -49,23 +51,20 @@ func NewWorkflow(pipeline *Pipeline, transcoder *Transcoder, packager *Packager,
 
 func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key string) (*WorkflowResult, error) {
 	result := &WorkflowResult{}
-	startTime := time.Now()
 
-	// Step 1: Ingest
-	w.logger.Info("Starting ingest", zap.String("bucket", bucket), zap.String("key", key))
-	ingestResult, err := w.pipeline.Ingest(ctx, inputFile, bucket, key)
+	// Step 1: Save uploaded file locally
+	w.logger.Info("Saving uploaded file locally", zap.String("key", key))
+	localFilePath, err := w.saveFileLocally(ctx, inputFile, key)
 	if err != nil {
-		w.logger.Error("Ingest failed", zap.Error(err), zap.Duration("duration", time.Since(startTime)))
-		result.IngestResult = ingestResult
-		return result, fmt.Errorf("ingest failed: %w", err)
+		w.logger.Error("Failed to save file locally", zap.Error(err))
+		return result, fmt.Errorf("failed to save file locally: %w", err)
 	}
-	result.IngestResult = ingestResult
-	w.logger.Info("Ingest completed", zap.String("bucket", bucket), zap.String("key", key), zap.Duration("duration", time.Since(startTime)))
+	w.logger.Info("File saved locally", zap.String("local_path", localFilePath))
 
-	// Step 2: Transcode
+	// Step 2: Transcode - Use local file path
 	transcodeStart := time.Now()
-	w.logger.Info("Starting transcode", zap.String("bucket", bucket), zap.String("key", key))
-	transcodeResults, err := w.transcoder.Transcode(ctx, fmt.Sprintf("%s/%s", bucket, key), w.config.Transcode)
+	w.logger.Info("Starting transcode", zap.String("local_path", localFilePath))
+	transcodeResults, err := w.transcoder.Transcode(ctx, localFilePath, w.config.Transcode)
 	if err != nil {
 		w.logger.Error("Some transcoding jobs failed", zap.Error(err), zap.Duration("duration", time.Since(transcodeStart)))
 	}
@@ -125,55 +124,101 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 	}
 	result.PackageResults = packageResults
 
-	// Step 5: Store outputs
-	storeStart := time.Now()
-	w.logger.Info("Starting storage upload")
-	var wg sync.WaitGroup
+	// Step 5: Store outputs (skip if local storage)
 	storageResults := make([]StorageResult, 0, len(packageResults))
-	resultChan := make(chan StorageResult, len(packageResults))
-	hasError := false
 
-	for _, pr := range packageResults {
-		if pr.Error != nil {
-			storageResults = append(storageResults, StorageResult{Key: pr.OutputPath, Error: pr.Error})
-			continue
-		}
-		wg.Add(1)
-		go func(outputPath string) {
-			defer wg.Done()
-			var storageKey string
-			err := Retry(ctx, w.logger, w.config.Pipeline.Retry, fmt.Sprintf("store %s", outputPath), func() error {
-				file, err := os.Open(outputPath)
-				if err != nil {
-					return err
-				}
-				defer file.Close()
-				storageKey = fmt.Sprintf("%s/%s", key, outputPath)
-				return w.storage.Upload(ctx, bucket, storageKey, file)
-			})
-			if err != nil {
-				w.logger.Error("Storage upload failed after retries", zap.String("key", storageKey), zap.Error(err), zap.Duration("duration", time.Since(storeStart)))
-				resultChan <- StorageResult{Key: storageKey, Error: err}
-				hasError = true
-				return
+	if w.config.Storage.Type == "local" || w.storage == nil {
+		w.logger.Info("Skipping storage upload - using local storage")
+		// For local storage, just record the local paths as successful
+		for _, pr := range packageResults {
+			if pr.Error != nil {
+				storageResults = append(storageResults, StorageResult{Key: pr.OutputPath, Error: pr.Error})
+			} else {
+				storageResults = append(storageResults, StorageResult{Key: pr.OutputPath})
 			}
-			w.logger.Info("Storage upload completed", zap.String("key", storageKey), zap.Duration("duration", time.Since(storeStart)))
-			resultChan <- StorageResult{Key: storageKey}
-		}(pr.OutputPath)
+		}
+	} else {
+		// Upload to cloud storage
+		storeStart := time.Now()
+		w.logger.Info("Starting storage upload")
+		var wg sync.WaitGroup
+		resultChan := make(chan StorageResult, len(packageResults))
+		hasError := false
+
+		for _, pr := range packageResults {
+			if pr.Error != nil {
+				storageResults = append(storageResults, StorageResult{Key: pr.OutputPath, Error: pr.Error})
+				continue
+			}
+			wg.Add(1)
+			go func(outputPath string) {
+				defer wg.Done()
+				var storageKey string
+				err := Retry(ctx, w.logger, w.config.Pipeline.Retry, fmt.Sprintf("store %s", outputPath), func() error {
+					file, err := os.Open(outputPath)
+					if err != nil {
+						return err
+					}
+					defer file.Close()
+					storageKey = fmt.Sprintf("%s/%s", key, outputPath)
+					return w.storage.Upload(ctx, bucket, storageKey, file)
+				})
+				if err != nil {
+					w.logger.Error("Storage upload failed after retries", zap.String("key", storageKey), zap.Error(err), zap.Duration("duration", time.Since(storeStart)))
+					resultChan <- StorageResult{Key: storageKey, Error: err}
+					hasError = true
+					return
+				}
+				w.logger.Info("Storage upload completed", zap.String("key", storageKey), zap.Duration("duration", time.Since(storeStart)))
+				resultChan <- StorageResult{Key: storageKey}
+			}(pr.OutputPath)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
+
+		for res := range resultChan {
+			storageResults = append(storageResults, res)
+		}
+
+		if hasError {
+			return result, fmt.Errorf("some storage uploads failed")
+		}
 	}
 
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	for res := range resultChan {
-		storageResults = append(storageResults, res)
-	}
 	result.StorageResults = storageResults
-
-	if hasError {
-		return result, fmt.Errorf("some storage uploads failed")
-	}
 	return result, nil
+}
+
+// saveFileLocally saves the uploaded file to local storage
+func (w *Workflow) saveFileLocally(ctx context.Context, file io.Reader, key string) (string, error) {
+	// Create local input directory if it doesn't exist
+	inputDir := "./input"
+	if err := os.MkdirAll(inputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create input directory: %w", err)
+	}
+
+	// Create local file path
+	localFilePath := filepath.Join(inputDir, key)
+
+	err := Retry(ctx, w.logger, w.config.Pipeline.Retry, fmt.Sprintf("save file %s", key), func() error {
+		// Create the local file
+		outFile, err := os.Create(localFilePath)
+		if err != nil {
+			return err
+		}
+		defer outFile.Close()
+
+		// Copy the uploaded file to local storage
+		_, err = io.Copy(outFile, file)
+		return err
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to save file locally: %w", err)
+	}
+
+	return localFilePath, nil
 }

@@ -5,9 +5,12 @@ import (
 	"StreamForge/pkg/ffmpeg"
 	"context"
 	"fmt"
-	"go.uber.org/zap"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"go.uber.org/zap"
 )
 
 type Packager struct {
@@ -61,6 +64,21 @@ func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []t
 
 					var outputPath string
 					err := Retry(ctx, p.logger, p.retry, fmt.Sprintf("package %s to %s", inputFile, config.Format), func() error {
+						// Create output directory structure: outputs/key/resolution/package/
+						keyWithoutExt := filepath.Base(inputFile)
+						keyWithoutExt = keyWithoutExt[:len(keyWithoutExt)-len(filepath.Ext(keyWithoutExt))] // Remove extension
+
+						// Extract resolution from the input file path (e.g., from "outputs/video/720/output_720p.mp4")
+						resolution := filepath.Base(filepath.Dir(inputFile))
+
+						outputDir := filepath.Join("./outputs", keyWithoutExt, resolution, "package")
+						if err := os.MkdirAll(outputDir, 0755); err != nil {
+							return fmt.Errorf("failed to create package output directory: %w", err)
+						}
+
+						// Create full output path
+						fullOutputPath := filepath.Join(outputDir, config.OutputPath)
+
 						args := []string{
 							"-i", inputFile,
 							"-f", config.Format,
@@ -77,7 +95,7 @@ func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []t
 						if config.Format == "dash" {
 							args = append(args, "-dash_segment_duration", fmt.Sprintf("%d", config.SegmentDuration))
 						}
-						args = append(args, "-y", config.OutputPath)
+						args = append(args, "-y", fullOutputPath)
 						var err error
 						outputPath, err = p.ffmpeg.Exec(ctx, args)
 						return err
