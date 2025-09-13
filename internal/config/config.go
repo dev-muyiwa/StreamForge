@@ -65,10 +65,7 @@ func (cl *ConfigLoader) validate(cfg *Config) error {
 		cfg.Pipeline.Retry.BackoffCoefficient = 2.0 // Default
 	}
 
-	if cfg.Pipeline.VMAF.Enabled && cfg.Pipeline.VMAF.ModelPath == "" {
-		return fmt.Errorf("vmaf.model_path required when VMAF is enabled")
-	}
-	if cfg.Pipeline.VMAF.MinScore < 0 || cfg.Pipeline.VMAF.MinScore > 100 {
+	if cfg.Pipeline.VMAF.Enabled && (cfg.Pipeline.VMAF.MinScore < 0 || cfg.Pipeline.VMAF.MinScore > 100) {
 		return fmt.Errorf("vmaf.min_score must be between 0 and 100")
 	}
 

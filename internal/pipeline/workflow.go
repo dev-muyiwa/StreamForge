@@ -82,13 +82,13 @@ func (w *Workflow) Run(ctx context.Context, inputFile io.Reader, bucket, key str
 		vmafChan := make(chan VMAFResult, len(transcodeResults))
 		for i, tr := range transcodeResults {
 			if tr.Error != nil {
-				vmafResults[i] = VMAFResult{InputFile: key, OutputFile: tr.OutputPath, Error: tr.Error}
+				vmafResults[i] = VMAFResult{InputFile: localFilePath, OutputFile: tr.OutputPath, Error: tr.Error}
 				continue
 			}
 			wg.Add(1)
 			go func(i int, outputPath string) {
 				defer wg.Done()
-				vmafResult, err := w.monitor.ValidateVMAF(ctx, key, outputPath)
+				vmafResult, err := w.monitor.ValidateVMAF(ctx, localFilePath, outputPath)
 				if err != nil {
 					vmafHasError = true
 				}

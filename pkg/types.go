@@ -14,9 +14,8 @@ type PackageConfig struct {
 }
 
 type VMAFConfig struct {
-	Enabled   bool    `mapstructure:"enabled" json:"enabled"`
-	MinScore  float64 `mapstructure:"min_score" json:"min_score"`
-	ModelPath string  `mapstructure:"model_path" json:"model_path"` // Path to VMAF model file
+	Enabled  bool    `mapstructure:"enabled" json:"enabled"`
+	MinScore float64 `mapstructure:"min_score" json:"min_score"`
 }
 
 type PipelineConfig struct {

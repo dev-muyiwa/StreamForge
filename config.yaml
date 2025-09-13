@@ -6,9 +6,8 @@ pipeline:
     initial_interval_sec: 1.0
     backoff_coefficient: 2.0
   vmaf:
-    enabled: false
+    enabled: true
     min_score: 80.0
-    model_path: ""
 
 storage:
   type: "local"  # options: local, s3
