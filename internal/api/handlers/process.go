@@ -175,21 +175,37 @@ func (h *ProcessHandler) extractMetadata(result *pipeline.WorkflowOutput, key st
 
 	// Generate stream URL from package results
 	if result != nil && len(result.PackageResults) > 0 {
-		// Find HLS master manifest first, then DASH, or use first available
+		// Priority: master.m3u8 > individual HLS playlists > DASH manifests
+
+		// First, look for master.m3u8 (highest priority)
 		for _, pr := range result.PackageResults {
-			if pr.Error == nil {
-				// Prefer HLS master manifest
-				if isHLSMasterManifest(pr.OutputPath) {
+			if pr.Error == nil && isMasterPlaylist(pr.OutputPath) {
+				streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
+				break
+			}
+		}
+
+		// If no master playlist, find individual HLS playlist
+		if streamURL == "" {
+			for _, pr := range result.PackageResults {
+				if pr.Error == nil && isHLSPlaylist(pr.OutputPath) && !isMasterPlaylist(pr.OutputPath) {
 					streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
 					break
 				}
-				// Fallback to DASH manifest
-				if isDASHManifest(pr.OutputPath) && streamURL == "" {
+			}
+		}
+
+		// Fallback to DASH manifest
+		if streamURL == "" {
+			for _, pr := range result.PackageResults {
+				if pr.Error == nil && isDASHManifest(pr.OutputPath) {
 					streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
+					break
 				}
 			}
 		}
-		// If no HLS or DASH found, use first successful package result
+
+		// If nothing else found, use first successful package result
 		if streamURL == "" {
 			for _, pr := range result.PackageResults {
 				if pr.Error == nil {
@@ -243,8 +259,13 @@ func extractResolutionFromPath(outputPath string) string {
 	return ""
 }
 
-// isHLSMasterManifest checks if the path is an HLS master manifest
-func isHLSMasterManifest(path string) bool {
+// isMasterPlaylist checks if the path is the master HLS playlist
+func isMasterPlaylist(path string) bool {
+	return len(path) >= 11 && path[len(path)-11:] == "master.m3u8"
+}
+
+// isHLSPlaylist checks if the path is an HLS playlist (.m3u8)
+func isHLSPlaylist(path string) bool {
 	return len(path) >= 5 && path[len(path)-5:] == ".m3u8"
 }
 
@@ -257,7 +278,14 @@ func isDASHManifest(path string) bool {
 func generateStreamURL(outputPath, key string, epochTime int64) string {
 	// For local storage, generate a relative URL
 	// In production, this would be an absolute URL to your CDN or storage service
-	// Format: /streams/{epochTime}/{key}/{filename}
+
+	// Check if this is the master playlist
+	if isMasterPlaylist(outputPath) {
+		// Format: /outputs/{epochTime}/master.m3u8
+		return fmt.Sprintf("/outputs/%d/master.m3u8", epochTime)
+	}
+
+	// For other files, extract filename
 	filename := ""
 	parts := []rune(outputPath)
 	lastSlash := -1
@@ -273,6 +301,8 @@ func generateStreamURL(outputPath, key string, epochTime int64) string {
 		filename = outputPath
 	}
 
+	// Format: /outputs/{epochTime}/{resolution}/package/{filename}
+	// Or fallback to: /streams/{epochTime}/{key}/{filename}
 	return fmt.Sprintf("/streams/%d/%s/%s", epochTime, key, filename)
 }
 
