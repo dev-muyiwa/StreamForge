@@ -3,7 +3,6 @@ package api
 import (
 	"StreamForge/internal/config"
 	"StreamForge/internal/pipeline"
-	"StreamForge/internal/pipeline/storage"
 	types "StreamForge/pkg"
 	"encoding/json"
 	"net/http"
@@ -13,33 +12,39 @@ import (
 )
 
 type Server struct {
-	storage    storage.Storage
-	transcoder *pipeline.Transcoder
-	packager   *pipeline.Packager
-	workflow   *pipeline.Workflow
-	cfg        *config.Config
+	temporalWorkflow *pipeline.TemporalWorkflow
+	cfg              *config.Config
 }
 
-func NewServer(storage storage.Storage, transcoder *pipeline.Transcoder, packager *pipeline.Packager, workflow *pipeline.Workflow, cfg *config.Config) *Server {
+func NewServer(temporalWorkflow *pipeline.TemporalWorkflow, cfg *config.Config) *Server {
 	return &Server{
-		storage:    storage,
-		transcoder: transcoder,
-		packager:   packager,
-		workflow:   workflow,
-		cfg:        cfg,
+		temporalWorkflow: temporalWorkflow,
+		cfg:              cfg,
 	}
 }
 
 func (s *Server) Start() {
+	// Add health check endpoint
+	http.HandleFunc("/health", s.handleHealth)
 	//http.HandleFunc("/upload", s.handleUpload)
 	//http.HandleFunc("/transcode", s.handleTranscode)
 	//http.HandleFunc("/package", s.handlePackage)
 	http.HandleFunc("/process", s.handleProcess)
 
-	err := http.ListenAndServe(":8080", nil)
+	err := http.ListenAndServe(":8081", nil)
 	if err != nil {
 		return
 	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "healthy",
+		"service": "streamforge",
+		"version": "1.0.0",
+	})
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -71,53 +76,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		InputFile string              `json:"input_file"`
-		Configs   []types.CodecConfig `json:"configs"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-	epochTime := time.Now().Unix()
-	results, err := s.transcoder.Transcode(r.Context(), req.InputFile, req.Configs, epochTime)
-	if err != nil {
-		http.Error(w, "Some transcoding jobs failed", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"results": results,
-	})
+	http.Error(w, "Transcode endpoint deprecated - use /process instead", http.StatusGone)
 }
 
 func (s *Server) handlePackage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		InputFiles []string              `json:"input_files"`
-		Configs    []types.PackageConfig `json:"configs"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-	epochTime := time.Now().Unix()
-	results, err := s.packager.Package(r.Context(), req.InputFiles, req.Configs, epochTime)
-	if err != nil {
-		http.Error(w, "Some packaging jobs failed", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"results": results,
-	})
+	http.Error(w, "Package endpoint deprecated - use /process instead", http.StatusGone)
 }
 
 func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
@@ -140,11 +103,22 @@ func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
 		key = "video.mp4" // Default todo(make unique)
 	}
 
-	result, err := s.workflow.Run(r.Context(), file, bucket, key)
+	// Create workflow input
+	workflowInput := pipeline.WorkflowInput{
+		File:      file,
+		Key:       key,
+		Bucket:    bucket,
+		EpochTime: time.Now().Unix(),
+	}
+
+	// Execute Temporal workflow
+	result, err := s.temporalWorkflow.ExecuteWorkflow(r.Context(), workflowInput)
 	if err != nil {
 		http.Error(w, "Processing failed", http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(map[string]interface{}{
 		"result": result,
 	})

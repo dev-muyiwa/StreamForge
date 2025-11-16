@@ -6,7 +6,11 @@ import (
 	"StreamForge/internal/pipeline"
 	"StreamForge/internal/pipeline/storage"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
+	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 )
 
@@ -28,6 +32,15 @@ func main() {
 		logger.Fatal("Failed to load config", zap.Error(err))
 	}
 
+	// Create Temporal client
+	temporalClient, err := client.Dial(client.Options{
+		HostPort: "localhost:7233", // Default Temporal server address
+	})
+	if err != nil {
+		logger.Fatal("Failed to create Temporal client", zap.Error(err))
+	}
+	defer temporalClient.Close()
+
 	var storageImpl storage.Storage
 	if cfg.Storage.Type != "local" {
 		var err error
@@ -37,20 +50,43 @@ func main() {
 		}
 	}
 
-	pipeLine := pipeline.NewPipeline(logger, cfg.Pipeline.Retry)
+	// Initialize pipeline components
 	transcoder := pipeline.NewTranscoder(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.MaxWorkers, cfg.Pipeline.Retry)
 	packager := pipeline.NewPackager(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.MaxWorkers, cfg.Pipeline.Retry)
 	monitor := pipeline.NewMonitor(cfg.Pipeline.FFMpegPath, logger, cfg.Pipeline.VMAF, cfg.Pipeline.Retry)
-	workflow := pipeline.NewWorkflow(pipeLine, transcoder, packager, monitor, storageImpl, logger, cfg)
-	//client := sdk.NewClient(store, transcoder, packager, logger, workflow)
-	//
-	//outputs, err := client.TranscodeVideo(context.Background(), "input.mp4", cfg.Transcode)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//log.Printf("Transcoded files: %v", outputs)
 
-	server := api.NewServer(storageImpl, transcoder, packager, workflow, cfg)
-	server.Start()
+	// Create Temporal workflow
+	temporalWorkflow := pipeline.NewTemporalWorkflow(
+		temporalClient,
+		logger,
+		cfg,
+		transcoder,
+		packager,
+		monitor,
+		storageImpl,
+	)
+
+	// Start Temporal worker
+	err = temporalWorkflow.StartWorker()
+	if err != nil {
+		logger.Fatal("Failed to start Temporal worker", zap.Error(err))
+	}
+	defer temporalWorkflow.StopWorker()
+
+	logger.Info("Temporal worker started successfully")
+
+	server := api.NewServer(temporalWorkflow, cfg)
+
+	// Start server in a goroutine
+	go func() {
+		logger.Info("Starting API server on :8081")
+		server.Start()
+	}()
+
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	logger.Info("Shutting down...")
 }
