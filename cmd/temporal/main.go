@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
 	"go.uber.org/zap"
 )
@@ -53,7 +54,7 @@ func main() {
 		}
 	}
 
-	// Create Temporal workflow
+	// Create Temporal workflow (without job manager for standalone worker)
 	temporalWorkflow := pipeline.NewTemporalWorkflow(
 		temporalClient,
 		logger,
@@ -62,6 +63,7 @@ func main() {
 		packager,
 		monitor,
 		storageImpl,
+		nil, // No job manager for standalone worker
 	)
 
 	// Start Temporal worker
@@ -76,6 +78,7 @@ func main() {
 	// Example: Execute a workflow
 	ctx := context.Background()
 	workflowInput := pipeline.WorkflowInput{
+		JobID:     uuid.Nil, // No job tracking for standalone worker
 		Key:       "video.mp4",
 		Bucket:    "input",
 		EpochTime: time.Now().Unix(),

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"StreamForge/internal/config"
+	"StreamForge/internal/job"
 	"StreamForge/internal/pipeline/storage"
 	"context"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -28,11 +30,13 @@ type TemporalWorkflow struct {
 	packager   *Packager
 	monitor    *Monitor
 	storage    storage.Storage
+	jobManager *job.Manager
 }
 
 // WorkflowInput represents the input for the video processing workflow
 type WorkflowInput struct {
 	File      io.Reader `json:"-"`
+	JobID     uuid.UUID `json:"job_id"`
 	Key       string    `json:"key"`
 	Bucket    string    `json:"bucket"`
 	EpochTime int64     `json:"epoch_time"`
@@ -50,19 +54,21 @@ type WorkflowOutput struct {
 
 // ActivityInput represents input for activities
 type ActivityInput struct {
-	FilePath   string `json:"file_path"`
-	Key        string `json:"key"`
-	Bucket     string `json:"bucket"`
-	EpochTime  int64  `json:"epoch_time"`
-	Resolution string `json:"resolution,omitempty"`
+	JobID      uuid.UUID `json:"job_id"`
+	FilePath   string    `json:"file_path"`
+	Key        string    `json:"key"`
+	Bucket     string    `json:"bucket"`
+	EpochTime  int64     `json:"epoch_time"`
+	Resolution string    `json:"resolution,omitempty"`
 }
 
 // PackageInput represents input for package activity
 type PackageInput struct {
-	FilePaths []string `json:"file_paths"`
-	Key       string   `json:"key"`
-	Bucket    string   `json:"bucket"`
-	EpochTime int64    `json:"epoch_time"`
+	JobID     uuid.UUID `json:"job_id"`
+	FilePaths []string  `json:"file_paths"`
+	Key       string    `json:"key"`
+	Bucket    string    `json:"bucket"`
+	EpochTime int64     `json:"epoch_time"`
 }
 
 // ActivityOutput represents output from activities
@@ -80,6 +86,7 @@ func NewTemporalWorkflow(
 	packager *Packager,
 	monitor *Monitor,
 	storage storage.Storage,
+	jobManager *job.Manager,
 ) *TemporalWorkflow {
 	return &TemporalWorkflow{
 		client:     client,
@@ -89,6 +96,7 @@ func NewTemporalWorkflow(
 		packager:   packager,
 		monitor:    monitor,
 		storage:    storage,
+		jobManager: jobManager,
 	}
 }
 
@@ -104,6 +112,7 @@ func (tw *TemporalWorkflow) StartWorker() error {
 		tw.storage,
 		tw.config,
 		tw.logger,
+		tw.jobManager,
 	)
 
 	// Register workflow and activities
@@ -129,10 +138,22 @@ func (tw *TemporalWorkflow) ExecuteWorkflow(ctx context.Context, input WorkflowI
 	// Step 1: Save file locally before starting the workflow
 	// (Temporal workflows can't accept io.Reader, so we need to save it first)
 	if input.File != nil {
-		tw.logger.Info("Saving uploaded file locally", zap.String("key", input.Key), zap.Int64("epoch_time", input.EpochTime))
+		tw.logger.Info("Saving uploaded file locally",
+			zap.String("job_id", input.JobID.String()),
+			zap.String("key", input.Key),
+			zap.Int64("epoch_time", input.EpochTime))
+
+		// Emit uploading progress
+		if tw.jobManager != nil {
+			tw.jobManager.EmitProgress(ctx, input.JobID, job.StageUploading, 10, "Uploading video file", nil)
+		}
+
 		localFilePath, err := tw.saveFileLocally(ctx, input.File, input.Key)
 		if err != nil {
 			tw.logger.Error("Failed to save file locally", zap.Error(err))
+			if tw.jobManager != nil {
+				tw.jobManager.EmitError(ctx, input.JobID, fmt.Sprintf("Failed to save file: %v", err))
+			}
 			return nil, fmt.Errorf("failed to save file locally: %w", err)
 		}
 		tw.logger.Info("File saved locally", zap.String("local_path", localFilePath))
@@ -148,12 +169,18 @@ func (tw *TemporalWorkflow) ExecuteWorkflow(ctx context.Context, input WorkflowI
 
 	we, err := tw.client.ExecuteWorkflow(ctx, workflowOptions, VideoProcessingWorkflow, input)
 	if err != nil {
+		if tw.jobManager != nil {
+			tw.jobManager.EmitError(ctx, input.JobID, fmt.Sprintf("Failed to start workflow: %v", err))
+		}
 		return nil, fmt.Errorf("failed to start workflow: %w", err)
 	}
 
 	var result WorkflowOutput
 	err = we.Get(ctx, &result)
 	if err != nil {
+		if tw.jobManager != nil {
+			tw.jobManager.EmitError(ctx, input.JobID, fmt.Sprintf("Workflow execution failed: %v", err))
+		}
 		return nil, fmt.Errorf("workflow execution failed: %w", err)
 	}
 
@@ -216,6 +243,7 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 
 	// Step 1: Save file locally
 	saveFileInput := ActivityInput{
+		JobID:     input.JobID,
 		FilePath:  input.Key,
 		Key:       input.Key,
 		Bucket:    input.Bucket,
@@ -243,6 +271,7 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 	transcodeCtx := workflow.WithActivityOptions(ctx, transcodeOptions)
 
 	transcodeInput := ActivityInput{
+		JobID:     input.JobID,
 		FilePath:  localFilePath,
 		Key:       input.Key,
 		EpochTime: input.EpochTime,
@@ -288,6 +317,7 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 			}
 
 			vmafInput := ActivityInput{
+				JobID:     input.JobID,
 				FilePath:  localFilePath,
 				Key:       tr.OutputPath,
 				EpochTime: input.EpochTime,
@@ -342,6 +372,7 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 
 	// Step 5: Package all successful transcodes together
 	packageInput := PackageInput{
+		JobID:     input.JobID,
 		FilePaths: transcodeOutputs,
 		Key:       input.Key,
 		EpochTime: input.EpochTime,
@@ -378,6 +409,7 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 		}
 
 		storeInput := ActivityInput{
+			JobID:     input.JobID,
 			FilePath:  pr.OutputPath,
 			Key:       input.Key,
 			Bucket:    input.Bucket,
@@ -428,6 +460,7 @@ type Activities struct {
 	storage    storage.Storage
 	config     *config.Config
 	logger     *zap.Logger
+	jobManager *job.Manager
 }
 
 // NewActivities creates a new Activities instance
@@ -438,6 +471,7 @@ func NewActivities(
 	storage storage.Storage,
 	config *config.Config,
 	logger *zap.Logger,
+	jobManager *job.Manager,
 ) *Activities {
 	return &Activities{
 		transcoder: transcoder,
@@ -446,6 +480,7 @@ func NewActivities(
 		storage:    storage,
 		config:     config,
 		logger:     logger,
+		jobManager: jobManager,
 	}
 }
 
@@ -470,6 +505,11 @@ func (a *Activities) TranscodeActivity(ctx context.Context, input ActivityInput)
 
 	logger.Info("Starting transcoding activity", "input", input.FilePath, "epoch_time", input.EpochTime)
 
+	// Emit progress: starting transcoding
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 30, "Starting video transcoding", nil)
+	}
+
 	// Use the actual transcoder to transcode the video
 	transcodeResults, err := a.transcoder.Transcode(ctx, input.FilePath, a.config.Transcode, input.EpochTime)
 	if err != nil {
@@ -481,6 +521,11 @@ func (a *Activities) TranscodeActivity(ctx context.Context, input ActivityInput)
 		return nil, fmt.Errorf("transcoding failed: %w", err)
 	}
 
+	// Emit progress: transcoding completed
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 50, fmt.Sprintf("Transcoded %d resolutions", len(transcodeResults)), nil)
+	}
+
 	logger.Info("Transcoding activity completed", "results", len(transcodeResults))
 	return transcodeResults, nil
 }
@@ -490,6 +535,11 @@ func (a *Activities) VMAFValidationActivity(ctx context.Context, input ActivityI
 	logger := activity.GetLogger(ctx)
 
 	logger.Info("Starting VMAF validation activity", "input", input.FilePath, "output", input.Key)
+
+	// Emit progress: starting VMAF validation
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageValidation, 60, "Validating video quality (VMAF)", nil)
+	}
 
 	// Use the actual monitor to validate VMAF quality
 	vmafResult, err := a.monitor.ValidateVMAF(ctx, input.FilePath, input.Key)
@@ -512,6 +562,11 @@ func (a *Activities) PackageActivity(ctx context.Context, input PackageInput) ([
 
 	logger.Info("Starting packaging activity", "inputs", len(input.FilePaths), "epoch_time", input.EpochTime)
 
+	// Emit progress: starting packaging
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 75, "Creating HLS/DASH manifests", nil)
+	}
+
 	// Use the actual packager to package the videos
 	packageResults, err := a.packager.Package(ctx, input.FilePaths, a.config.Package, input.EpochTime)
 	if err != nil {
@@ -521,6 +576,11 @@ func (a *Activities) PackageActivity(ctx context.Context, input PackageInput) ([
 			return packageResults, nil
 		}
 		return nil, fmt.Errorf("packaging failed: %w", err)
+	}
+
+	// Emit progress: packaging completed
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 85, fmt.Sprintf("Packaged %d outputs", len(packageResults)), nil)
 	}
 
 	logger.Info("Packaging activity completed", "results", len(packageResults))
@@ -533,9 +593,17 @@ func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (St
 
 	logger.Info("Starting storage activity", "key", input.Key, "file_path", input.FilePath)
 
+	// Emit progress: starting storage upload
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 90, "Uploading to cloud storage", nil)
+	}
+
 	// Check if using local storage
 	if a.config.Storage.Type == "local" || a.storage == nil {
 		logger.Info("Using local storage - skipping upload")
+		if a.jobManager != nil {
+			a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 95, "Using local storage", nil)
+		}
 		return StorageResult{
 			Key:   input.FilePath,
 			Error: nil,
@@ -560,6 +628,11 @@ func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (St
 			Key:   storageKey,
 			Error: err,
 		}, err
+	}
+
+	// Emit progress: storage upload completed
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 95, "Upload completed", nil)
 	}
 
 	logger.Info("Storage activity completed", "key", storageKey)
