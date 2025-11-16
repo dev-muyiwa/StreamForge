@@ -59,6 +59,27 @@ func (m *Manager) GetJobWithProgress(ctx context.Context, jobID uuid.UUID, limit
 	return m.store.GetJobWithProgress(ctx, jobID, limit)
 }
 
+// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URL)
+func (m *Manager) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURL string) error {
+	err := m.store.UpdateJobMetadata(ctx, jobID, resolutions, peakVMAFScore, streamURL)
+	if err != nil {
+		m.logger.Error("Failed to update job metadata",
+			zap.String("job_id", jobID.String()),
+			zap.Error(err),
+		)
+		return err
+	}
+
+	m.logger.Info("Job metadata updated",
+		zap.String("job_id", jobID.String()),
+		zap.Int("resolutions", len(resolutions)),
+		zap.Float64("peak_vmaf", peakVMAFScore),
+		zap.String("stream_url", streamURL),
+	)
+
+	return nil
+}
+
 // EmitProgress emits a progress update for a job
 func (m *Manager) EmitProgress(ctx context.Context, jobID uuid.UUID, stage JobStage, progress int, message string, details map[string]interface{}) error {
 	// Update job status in database

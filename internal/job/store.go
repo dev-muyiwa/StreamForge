@@ -55,19 +55,21 @@ func (s *Store) CreateJob(ctx context.Context, key, bucket, workflowID string) (
 func (s *Store) GetJob(ctx context.Context, jobID uuid.UUID) (*Job, error) {
 	query := `
 		SELECT id, key, bucket, status, stage, progress, workflow_id,
-		       error_message, result, created_at, updated_at, completed_at
+		       error_message, result, resolutions, peak_vmaf_score, stream_url,
+		       created_at, updated_at, completed_at
 		FROM jobs
 		WHERE id = $1
 	`
 
 	var job Job
-	var stage, errorMessage, workflowID *string
+	var stage, errorMessage, workflowID, streamURL *string
 	var result []byte
 	var completedAt *time.Time
+	var peakVMAFScore *float64
 
 	err := s.db.QueryRow(ctx, query, jobID).Scan(
 		&job.ID, &job.Key, &job.Bucket, &job.Status, &stage, &job.Progress,
-		&workflowID, &errorMessage, &result,
+		&workflowID, &errorMessage, &result, &job.Resolutions, &peakVMAFScore, &streamURL,
 		&job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if err != nil {
@@ -88,6 +90,12 @@ func (s *Store) GetJob(ctx context.Context, jobID uuid.UUID) (*Job, error) {
 	}
 	if result != nil {
 		job.Result = result
+	}
+	if peakVMAFScore != nil {
+		job.PeakVMAFScore = *peakVMAFScore
+	}
+	if streamURL != nil {
+		job.StreamURL = *streamURL
 	}
 	job.CompletedAt = completedAt
 
@@ -207,6 +215,22 @@ func (s *Store) UpdateJobResult(ctx context.Context, jobID uuid.UUID, result int
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update job result: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URL)
+func (s *Store) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURL string) error {
+	query := `
+		UPDATE jobs
+		SET resolutions = $2, peak_vmaf_score = $3, stream_url = $4, updated_at = $5
+		WHERE id = $1
+	`
+
+	_, err := s.db.Exec(ctx, query, jobID, resolutions, peakVMAFScore, streamURL, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to update job metadata: %w", err)
 	}
 
 	return nil

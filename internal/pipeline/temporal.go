@@ -507,8 +507,10 @@ func (a *Activities) TranscodeActivity(ctx context.Context, input ActivityInput)
 
 	// Emit progress: starting transcoding
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 30, "Starting video transcoding", nil)
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 20, "Initializing video transcoding", nil)
 	}
+
+	totalResolutions := len(a.config.Transcode)
 
 	// Use the actual transcoder to transcode the video
 	transcodeResults, err := a.transcoder.Transcode(ctx, input.FilePath, a.config.Transcode, input.EpochTime)
@@ -521,24 +523,69 @@ func (a *Activities) TranscodeActivity(ctx context.Context, input ActivityInput)
 		return nil, fmt.Errorf("transcoding failed: %w", err)
 	}
 
-	// Emit progress: transcoding completed
+	// Emit detailed progress for each successful resolution
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 50, fmt.Sprintf("Transcoded %d resolutions", len(transcodeResults)), nil)
+		successfulCount := 0
+		resolutions := []string{}
+
+		for _, result := range transcodeResults {
+			if result.Error == nil {
+				successfulCount++
+				// Extract resolution from codec config or output path
+				resolution := extractResolution(result.OutputPath)
+				if resolution != "" {
+					resolutions = append(resolutions, resolution)
+				}
+
+				// Calculate progress: 20% start + 30% for transcoding
+				progressPercent := 20 + int((float64(successfulCount)/float64(totalResolutions))*30)
+				a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, progressPercent,
+					fmt.Sprintf("Transcoded resolution: %s", resolution),
+					map[string]interface{}{
+						"resolution": resolution,
+						"completed":  successfulCount,
+						"total":      totalResolutions,
+					})
+			}
+		}
+
+		// Final transcoding progress
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 50,
+			fmt.Sprintf("Transcoded %d resolutions: %v", successfulCount, resolutions),
+			map[string]interface{}{
+				"resolutions": resolutions,
+			})
 	}
 
 	logger.Info("Transcoding activity completed", "results", len(transcodeResults))
 	return transcodeResults, nil
 }
 
+// extractResolution extracts resolution from output path
+func extractResolution(outputPath string) string {
+	// Extract resolution from path like "outputs/123456/720/video.mp4"
+	dir, _ := filepath.Split(outputPath)
+	resolution := filepath.Base(filepath.Dir(dir))
+	if resolution != "" && resolution != "." && resolution != ".." {
+		return resolution + "p"
+	}
+	return ""
+}
+
 // VMAFValidationActivity handles VMAF quality validation using the existing monitor
 func (a *Activities) VMAFValidationActivity(ctx context.Context, input ActivityInput) (VMAFResult, error) {
 	logger := activity.GetLogger(ctx)
 
-	logger.Info("Starting VMAF validation activity", "input", input.FilePath, "output", input.Key)
+	resolution := extractResolution(input.Key)
+	logger.Info("Starting VMAF validation activity", "input", input.FilePath, "output", input.Key, "resolution", resolution)
 
 	// Emit progress: starting VMAF validation
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StageValidation, 60, "Validating video quality (VMAF)", nil)
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageValidation, 55,
+			fmt.Sprintf("Analyzing quality for %s", resolution),
+			map[string]interface{}{
+				"resolution": resolution,
+			})
 	}
 
 	// Use the actual monitor to validate VMAF quality
@@ -552,7 +599,17 @@ func (a *Activities) VMAFValidationActivity(ctx context.Context, input ActivityI
 		}, err
 	}
 
-	logger.Info("VMAF validation activity completed", "score", vmafResult.VMAFScore)
+	// Emit progress with VMAF score
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageValidation, 60,
+			fmt.Sprintf("Quality validated for %s: %.2f VMAF", resolution, vmafResult.VMAFScore),
+			map[string]interface{}{
+				"resolution": resolution,
+				"vmaf_score": fmt.Sprintf("%.2f", vmafResult.VMAFScore),
+			})
+	}
+
+	logger.Info("VMAF validation activity completed", "score", vmafResult.VMAFScore, "resolution", resolution)
 	return *vmafResult, nil
 }
 
@@ -564,7 +621,7 @@ func (a *Activities) PackageActivity(ctx context.Context, input PackageInput) ([
 
 	// Emit progress: starting packaging
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 75, "Creating HLS/DASH manifests", nil)
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 65, "Preparing video packaging", nil)
 	}
 
 	// Use the actual packager to package the videos
@@ -578,31 +635,90 @@ func (a *Activities) PackageActivity(ctx context.Context, input PackageInput) ([
 		return nil, fmt.Errorf("packaging failed: %w", err)
 	}
 
-	// Emit progress: packaging completed
+	// Emit detailed progress for each successful package format
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 85, fmt.Sprintf("Packaged %d outputs", len(packageResults)), nil)
+		successfulCount := 0
+		formats := []string{}
+
+		for _, result := range packageResults {
+			if result.Error == nil {
+				successfulCount++
+				// Extract format from config or result
+				format := extractFormat(result.OutputPath)
+				if format != "" {
+					formats = append(formats, format)
+				}
+
+				// Calculate progress: 65% start + 20% for packaging (65-85%)
+				progressPercent := 65 + int((float64(successfulCount)/float64(len(packageResults)))*20)
+				a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, progressPercent,
+					fmt.Sprintf("Created %s manifest", format),
+					map[string]interface{}{
+						"format":    format,
+						"completed": successfulCount,
+						"total":     len(packageResults),
+					})
+			}
+		}
+
+		// Final packaging progress
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 85,
+			fmt.Sprintf("Packaging completed: %v", formats),
+			map[string]interface{}{
+				"formats": formats,
+			})
 	}
 
 	logger.Info("Packaging activity completed", "results", len(packageResults))
 	return packageResults, nil
 }
 
+// extractFormat extracts packaging format from output path
+func extractFormat(outputPath string) string {
+	// Extract format from path like "outputs/123456/hls/master.m3u8" or "outputs/123456/dash/manifest.mpd"
+	dir, _ := filepath.Split(outputPath)
+	format := filepath.Base(filepath.Dir(dir))
+	if format != "" && format != "." && format != ".." {
+		return format
+	}
+	// Try to determine from file extension
+	ext := filepath.Ext(outputPath)
+	switch ext {
+	case ".m3u8":
+		return "HLS"
+	case ".mpd":
+		return "DASH"
+	default:
+		return "unknown"
+	}
+}
+
 // StoreActivity handles storing the packaged results using the existing storage
 func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (StorageResult, error) {
 	logger := activity.GetLogger(ctx)
 
-	logger.Info("Starting storage activity", "key", input.Key, "file_path", input.FilePath)
+	fileName := filepath.Base(input.FilePath)
+	logger.Info("Starting storage activity", "key", input.Key, "file_path", input.FilePath, "file_name", fileName)
 
 	// Emit progress: starting storage upload
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 90, "Uploading to cloud storage", nil)
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 87,
+			fmt.Sprintf("Preparing to upload: %s", fileName),
+			map[string]interface{}{
+				"file_name": fileName,
+			})
 	}
 
 	// Check if using local storage
 	if a.config.Storage.Type == "local" || a.storage == nil {
 		logger.Info("Using local storage - skipping upload")
 		if a.jobManager != nil {
-			a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 95, "Using local storage", nil)
+			a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 95,
+				"Files stored locally",
+				map[string]interface{}{
+					"storage_type": "local",
+					"path":         input.FilePath,
+				})
 		}
 		return StorageResult{
 			Key:   input.FilePath,
@@ -611,9 +727,27 @@ func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (St
 	}
 
 	// Use the actual storage to upload the file
-	storageKey := fmt.Sprintf("%s/%s", input.Key, filepath.Base(input.FilePath))
+	storageKey := fmt.Sprintf("%s/%s", input.Key, fileName)
 
-	err := Retry(ctx, a.logger, a.config.Pipeline.Retry, fmt.Sprintf("store %s", input.FilePath), func() error {
+	// Get file size for progress details
+	fileInfo, err := os.Stat(input.FilePath)
+	var fileSizeMB float64
+	if err == nil {
+		fileSizeMB = float64(fileInfo.Size()) / (1024 * 1024)
+	}
+
+	// Emit progress with file details
+	if a.jobManager != nil {
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 90,
+			fmt.Sprintf("Uploading %s (%.2f MB)", fileName, fileSizeMB),
+			map[string]interface{}{
+				"file_name":    fileName,
+				"file_size_mb": fmt.Sprintf("%.2f", fileSizeMB),
+				"storage_key":  storageKey,
+			})
+	}
+
+	err = Retry(ctx, a.logger, a.config.Pipeline.Retry, fmt.Sprintf("store %s", input.FilePath), func() error {
 		file, err := os.Open(input.FilePath)
 		if err != nil {
 			return err
@@ -632,7 +766,12 @@ func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (St
 
 	// Emit progress: storage upload completed
 	if a.jobManager != nil {
-		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 95, "Upload completed", nil)
+		a.jobManager.EmitProgress(ctx, input.JobID, job.StageStorage, 93,
+			fmt.Sprintf("Uploaded: %s", fileName),
+			map[string]interface{}{
+				"file_name":   fileName,
+				"storage_key": storageKey,
+			})
 	}
 
 	logger.Info("Storage activity completed", "key", storageKey)

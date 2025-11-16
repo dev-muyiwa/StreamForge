@@ -31,18 +31,21 @@ const (
 
 // Job represents a video processing job
 type Job struct {
-	ID           uuid.UUID       `json:"id"`
-	Key          string          `json:"key"`
-	Bucket       string          `json:"bucket"`
-	Status       JobStatus       `json:"status"`
-	Stage        JobStage        `json:"stage,omitempty"`
-	Progress     int             `json:"progress"`
-	WorkflowID   string          `json:"workflow_id,omitempty"`
-	ErrorMessage string          `json:"error_message,omitempty"`
-	Result       json.RawMessage `json:"result,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
-	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
+	ID            uuid.UUID       `json:"id"`
+	Key           string          `json:"key"`
+	Bucket        string          `json:"bucket"`
+	Status        JobStatus       `json:"status"`
+	Stage         JobStage        `json:"stage,omitempty"`
+	Progress      int             `json:"progress"`
+	WorkflowID    string          `json:"workflow_id,omitempty"`
+	ErrorMessage  string          `json:"error_message,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Resolutions   []string        `json:"resolutions,omitempty"`
+	PeakVMAFScore float64         `json:"peak_vmaf_score,omitempty"`
+	StreamURL     string          `json:"stream_url,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
 }
 
 // ProgressEvent represents a single progress update event
