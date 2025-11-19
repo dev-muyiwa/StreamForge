@@ -116,10 +116,10 @@ func (h *ProcessHandler) processVideo(jobID uuid.UUID, file io.Reader, key, buck
 	}
 
 	// Extract metadata from workflow results
-	resolutions, peakVMAFScore, streamURL := h.extractMetadata(result, key, epochTime)
+	resolutions, peakVMAFScore, streamURLs := h.extractMetadata(result, key, epochTime)
 
 	// Update job metadata
-	err = h.jobManager.UpdateJobMetadata(ctx, jobID, resolutions, peakVMAFScore, streamURL)
+	err = h.jobManager.UpdateJobMetadata(ctx, jobID, resolutions, peakVMAFScore, streamURLs)
 	if err != nil {
 		h.logger.Error("Failed to update job metadata",
 			zap.String("job_id", jobID.String()),
@@ -142,15 +142,15 @@ func (h *ProcessHandler) processVideo(jobID uuid.UUID, file io.Reader, key, buck
 		zap.String("job_id", jobID.String()),
 		zap.Int("resolutions", len(resolutions)),
 		zap.Float64("peak_vmaf", peakVMAFScore),
-		zap.String("stream_url", streamURL),
+		zap.Any("stream_urls", streamURLs),
 	)
 }
 
 // extractMetadata extracts metadata from workflow results
-func (h *ProcessHandler) extractMetadata(result *pipeline.WorkflowOutput, key string, epochTime int64) ([]string, float64, string) {
+func (h *ProcessHandler) extractMetadata(result *pipeline.WorkflowOutput, key string, epochTime int64) ([]string, float64, map[string]string) {
 	resolutions := []string{}
 	var peakVMAFScore float64
-	streamURL := ""
+	streamURLs := make(map[string]string)
 
 	// Extract resolutions from transcode results
 	if result != nil && len(result.TranscodeResults) > 0 {
@@ -173,50 +173,41 @@ func (h *ProcessHandler) extractMetadata(result *pipeline.WorkflowOutput, key st
 		}
 	}
 
-	// Generate stream URL from package results
+	// Generate stream URLs from package results
 	if result != nil && len(result.PackageResults) > 0 {
-		// Priority: master.m3u8 > individual HLS playlists > DASH manifests
-
-		// First, look for master.m3u8 (highest priority)
+		// Look for master playlist first (auto quality)
 		for _, pr := range result.PackageResults {
 			if pr.Error == nil && isMasterPlaylist(pr.OutputPath) {
-				streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
+				streamURLs["auto"] = generateStreamURL(pr.OutputPath, key, epochTime)
 				break
 			}
 		}
 
-		// If no master playlist, find individual HLS playlist
-		if streamURL == "" {
-			for _, pr := range result.PackageResults {
-				if pr.Error == nil && isHLSPlaylist(pr.OutputPath) && !isMasterPlaylist(pr.OutputPath) {
-					streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
-					break
+		// Generate URLs for individual resolution playlists
+		for _, pr := range result.PackageResults {
+			if pr.Error == nil && isHLSPlaylist(pr.OutputPath) && !isMasterPlaylist(pr.OutputPath) {
+				// Extract resolution from path
+				resolution := extractResolutionFromPath(pr.OutputPath)
+				if resolution != "" {
+					streamURLs[resolution] = generateResolutionURL(pr.OutputPath, resolution, epochTime)
 				}
 			}
 		}
 
-		// Fallback to DASH manifest
-		if streamURL == "" {
-			for _, pr := range result.PackageResults {
-				if pr.Error == nil && isDASHManifest(pr.OutputPath) {
-					streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
-					break
-				}
-			}
-		}
-
-		// If nothing else found, use first successful package result
-		if streamURL == "" {
-			for _, pr := range result.PackageResults {
-				if pr.Error == nil {
-					streamURL = generateStreamURL(pr.OutputPath, key, epochTime)
-					break
-				}
+		// If no master playlist but we have individual playlists, set first one as "auto"
+		if _, hasAuto := streamURLs["auto"]; !hasAuto && len(streamURLs) > 0 {
+			// Find the highest resolution and use it as auto
+			for quality, url := range streamURLs {
+				streamURLs["auto"] = url
+				h.logger.Info("No master playlist found, using quality as auto",
+					zap.String("quality", quality),
+				)
+				break
 			}
 		}
 	}
 
-	return resolutions, peakVMAFScore, streamURL
+	return resolutions, peakVMAFScore, streamURLs
 }
 
 // extractResolutionFromPath extracts resolution from file path
@@ -304,6 +295,18 @@ func generateStreamURL(outputPath, key string, epochTime int64) string {
 	// Format: /outputs/{epochTime}/{resolution}/package/{filename}
 	// Or fallback to: /streams/{epochTime}/{key}/{filename}
 	return fmt.Sprintf("/streams/%d/%s/%s", epochTime, key, filename)
+}
+
+// generateResolutionURL generates a URL for a specific resolution's playlist
+func generateResolutionURL(outputPath, resolution string, epochTime int64) string {
+	// Strip 'p' suffix if present (e.g., "720p" -> "720")
+	resolutionPath := resolution
+	if len(resolution) > 0 && resolution[len(resolution)-1] == 'p' {
+		resolutionPath = resolution[:len(resolution)-1]
+	}
+
+	// Format: /outputs/{epochTime}/{resolution}/package/playlist.m3u8
+	return fmt.Sprintf("/outputs/%d/%s/package/playlist.m3u8", epochTime, resolutionPath)
 }
 
 // contains checks if a string slice contains a specific string

@@ -55,21 +55,21 @@ func (s *Store) CreateJob(ctx context.Context, key, bucket, workflowID string) (
 func (s *Store) GetJob(ctx context.Context, jobID uuid.UUID) (*Job, error) {
 	query := `
 		SELECT id, key, bucket, status, stage, progress, workflow_id,
-		       error_message, result, resolutions, peak_vmaf_score, stream_url,
+		       error_message, result, resolutions, peak_vmaf_score, stream_urls,
 		       created_at, updated_at, completed_at
 		FROM jobs
 		WHERE id = $1
 	`
 
 	var job Job
-	var stage, errorMessage, workflowID, streamURL *string
-	var result []byte
+	var stage, errorMessage, workflowID *string
+	var result, streamURLsJSON []byte
 	var completedAt *time.Time
 	var peakVMAFScore *float64
 
 	err := s.db.QueryRow(ctx, query, jobID).Scan(
 		&job.ID, &job.Key, &job.Bucket, &job.Status, &stage, &job.Progress,
-		&workflowID, &errorMessage, &result, &job.Resolutions, &peakVMAFScore, &streamURL,
+		&workflowID, &errorMessage, &result, &job.Resolutions, &peakVMAFScore, &streamURLsJSON,
 		&job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if err != nil {
@@ -94,8 +94,11 @@ func (s *Store) GetJob(ctx context.Context, jobID uuid.UUID) (*Job, error) {
 	if peakVMAFScore != nil {
 		job.PeakVMAFScore = *peakVMAFScore
 	}
-	if streamURL != nil {
-		job.StreamURL = *streamURL
+	if streamURLsJSON != nil {
+		var streamURLs map[string]string
+		if err := json.Unmarshal(streamURLsJSON, &streamURLs); err == nil {
+			job.StreamURLs = streamURLs
+		}
 	}
 	job.CompletedAt = completedAt
 
@@ -220,15 +223,20 @@ func (s *Store) UpdateJobResult(ctx context.Context, jobID uuid.UUID, result int
 	return nil
 }
 
-// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URL)
-func (s *Store) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURL string) error {
+// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URLs)
+func (s *Store) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURLs map[string]string) error {
+	streamURLsJSON, err := json.Marshal(streamURLs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal stream URLs: %w", err)
+	}
+
 	query := `
 		UPDATE jobs
-		SET resolutions = $2, peak_vmaf_score = $3, stream_url = $4, updated_at = $5
+		SET resolutions = $2, peak_vmaf_score = $3, stream_urls = $4, updated_at = $5
 		WHERE id = $1
 	`
 
-	_, err := s.db.Exec(ctx, query, jobID, resolutions, peakVMAFScore, streamURL, time.Now())
+	_, err = s.db.Exec(ctx, query, jobID, resolutions, peakVMAFScore, streamURLsJSON, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to update job metadata: %w", err)
 	}

@@ -148,6 +148,7 @@ func runMigrations(ctx context.Context, db *pgxpool.Pool, logger *zap.Logger) er
 		"migrations/001_create_jobs.sql",
 		"migrations/002_create_progress_events.sql",
 		"migrations/003_add_job_metadata.sql",
+		"migrations/004_update_stream_urls_to_map.sql",
 	}
 
 	for _, migrationFile := range migrations {

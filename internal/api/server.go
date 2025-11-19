@@ -83,6 +83,10 @@ func (s *Server) setupRoutes() {
 	// Job status endpoints
 	s.router.Get("/jobs/{id}", jobsHandler.GetJob)
 	s.router.Get("/jobs/{id}/stream", streamHandler.StreamProgress)
+
+	// Serve static HLS/DASH files from outputs directory
+	fileServer := http.FileServer(http.Dir("./outputs"))
+	s.router.Handle("/outputs/*", http.StripPrefix("/outputs", fileServer))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

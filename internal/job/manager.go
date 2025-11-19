@@ -59,9 +59,9 @@ func (m *Manager) GetJobWithProgress(ctx context.Context, jobID uuid.UUID, limit
 	return m.store.GetJobWithProgress(ctx, jobID, limit)
 }
 
-// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URL)
-func (m *Manager) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURL string) error {
-	err := m.store.UpdateJobMetadata(ctx, jobID, resolutions, peakVMAFScore, streamURL)
+// UpdateJobMetadata updates job metadata (resolutions, VMAF score, stream URLs)
+func (m *Manager) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolutions []string, peakVMAFScore float64, streamURLs map[string]string) error {
+	err := m.store.UpdateJobMetadata(ctx, jobID, resolutions, peakVMAFScore, streamURLs)
 	if err != nil {
 		m.logger.Error("Failed to update job metadata",
 			zap.String("job_id", jobID.String()),
@@ -74,7 +74,7 @@ func (m *Manager) UpdateJobMetadata(ctx context.Context, jobID uuid.UUID, resolu
 		zap.String("job_id", jobID.String()),
 		zap.Int("resolutions", len(resolutions)),
 		zap.Float64("peak_vmaf", peakVMAFScore),
-		zap.String("stream_url", streamURL),
+		zap.Any("stream_urls", streamURLs),
 	)
 
 	return nil
@@ -188,7 +188,9 @@ func (m *Manager) Subscribe(jobID uuid.UUID) chan ProgressUpdate {
 	m.clientsMu.Lock()
 	defer m.clientsMu.Unlock()
 
-	ch := make(chan ProgressUpdate, 10)
+	// Buffer size of 50 to handle bursts of rapid progress updates
+	// without blocking the emitter
+	ch := make(chan ProgressUpdate, 50)
 	m.clients[jobID] = append(m.clients[jobID], ch)
 
 	m.logger.Info("Client subscribed",
