@@ -22,16 +22,22 @@ storage:
 
 transcode:
   - codec: "libx264"
+    bitrate: "1500k"
+    resolution: "1080"
+  - codec: "libx264"
     bitrate: "1000k"
     resolution: "720"
   - codec: "libx264"
     bitrate: "500k"
     resolution: "480"
+  - codec: "libx264"
+    bitrate: "250k"
+    resolution: "360"
 
 package:
   - format: "hls"
-    segment_duration: 10
-    llhls: false
+    segment_duration: 5
+    llhls: true
     output_path: "playlist.m3u8"
 
 plugins: []

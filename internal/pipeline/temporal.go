@@ -6,7 +6,6 @@ import (
 	"StreamForge/internal/pipeline/storage"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,7 +34,7 @@ type TemporalWorkflow struct {
 
 // WorkflowInput represents the input for the video processing workflow
 type WorkflowInput struct {
-	File      io.Reader `json:"-"`
+	FileData  []byte    `json:"-"` // Byte slice instead of io.Reader to prevent "file already closed" errors
 	JobID     uuid.UUID `json:"job_id"`
 	Key       string    `json:"key"`
 	Bucket    string    `json:"bucket"`
@@ -137,18 +136,19 @@ func (tw *TemporalWorkflow) StopWorker() {
 func (tw *TemporalWorkflow) ExecuteWorkflow(ctx context.Context, input WorkflowInput) (*WorkflowOutput, error) {
 	// Step 1: Save file locally before starting the workflow
 	// (Temporal workflows can't accept io.Reader, so we need to save it first)
-	if input.File != nil {
+	if input.FileData != nil && len(input.FileData) > 0 {
 		tw.logger.Info("Saving uploaded file locally",
 			zap.String("job_id", input.JobID.String()),
 			zap.String("key", input.Key),
-			zap.Int64("epoch_time", input.EpochTime))
+			zap.Int64("epoch_time", input.EpochTime),
+			zap.Int("file_size", len(input.FileData)))
 
 		// Emit uploading progress
 		if tw.jobManager != nil {
 			tw.jobManager.EmitProgress(ctx, input.JobID, job.StageUploading, 10, "Uploading video file", nil)
 		}
 
-		localFilePath, err := tw.saveFileLocally(ctx, input.File, input.Key)
+		localFilePath, err := tw.saveFileLocally(ctx, input.FileData, input.Key)
 		if err != nil {
 			tw.logger.Error("Failed to save file locally", zap.Error(err))
 			if tw.jobManager != nil {
@@ -188,7 +188,7 @@ func (tw *TemporalWorkflow) ExecuteWorkflow(ctx context.Context, input WorkflowI
 }
 
 // saveFileLocally saves the uploaded file to local storage
-func (tw *TemporalWorkflow) saveFileLocally(ctx context.Context, file io.Reader, key string) (string, error) {
+func (tw *TemporalWorkflow) saveFileLocally(ctx context.Context, fileData []byte, key string) (string, error) {
 	// Create local input directory if it doesn't exist
 	inputDir := "./input"
 	if err := os.MkdirAll(inputDir, 0755); err != nil {
@@ -198,6 +198,7 @@ func (tw *TemporalWorkflow) saveFileLocally(ctx context.Context, file io.Reader,
 	// Create local file path
 	localFilePath := filepath.Join(inputDir, key)
 
+	// Retry writing the file (not reading - we already have the data in memory)
 	err := Retry(ctx, tw.logger, tw.config.Pipeline.Retry, fmt.Sprintf("save file %s", key), func() error {
 		// Create the local file
 		outFile, err := os.Create(localFilePath)
@@ -206,8 +207,8 @@ func (tw *TemporalWorkflow) saveFileLocally(ctx context.Context, file io.Reader,
 		}
 		defer outFile.Close()
 
-		// Copy the uploaded file to local storage
-		_, err = io.Copy(outFile, file)
+		// Write the file data to disk
+		_, err = outFile.Write(fileData)
 		return err
 	})
 

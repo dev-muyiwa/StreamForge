@@ -79,26 +79,65 @@ func (p *Packager) Package(ctx context.Context, inputFiles []string, configs []t
 						// Create full output path
 						fullOutputPath := filepath.Join(outputDir, config.OutputPath)
 
+						p.logger.Info("Packaging with config",
+							zap.String("format", config.Format),
+							zap.Int("segment_duration", config.SegmentDuration),
+							zap.String("resolution", resolution),
+							zap.Bool("llhls", config.LLHLS))
+
 						args := []string{
 							"-i", inputFile,
-							"-f", config.Format,
-							"-hls_time", fmt.Sprintf("%d", config.SegmentDuration),
-							"-hls_list_size", "0",
+							"-c", "copy", // Copy codec to avoid re-encoding
 						}
-						if config.Format == "hls" && config.LLHLS {
-							args = append(args,
-								"-hls_segment_type", "fmp4",
-								"-hls_flags", "program_date_time+independent_segments",
-								"-hls_playlist_type", "vod",
-							)
+
+						if config.Format == "hls" {
+							args = append(args, "-f", "hls")
+							args = append(args, "-hls_time", fmt.Sprintf("%d", config.SegmentDuration))
+							args = append(args, "-hls_list_size", "0")
+
+							if config.LLHLS {
+								// For LLHLS with fMP4
+								// Use full path for init file creation, but it will be written as relative in playlist
+								segmentPattern := filepath.Join(outputDir, "playlist%d.m4s")
+								initFilePath := filepath.Join(outputDir, "init.mp4")
+
+								args = append(args,
+									"-hls_segment_type", "fmp4",
+									"-hls_segment_filename", segmentPattern,
+									"-hls_fmp4_init_filename", initFilePath, // Full path for creation
+									"-hls_flags", "independent_segments",
+									"-hls_playlist_type", "vod",
+								)
+
+								p.logger.Info("LLHLS fMP4 config",
+									zap.String("init_file_path", initFilePath),
+									zap.String("segment_pattern", segmentPattern),
+									zap.String("playlist_path", fullOutputPath))
+							}
 						}
+
 						if config.Format == "dash" {
+							args = append(args, "-f", "dash")
 							args = append(args, "-dash_segment_duration", fmt.Sprintf("%d", config.SegmentDuration))
 						}
+
 						args = append(args, "-y", fullOutputPath)
 						var err error
 						outputPath, err = p.ffmpeg.Exec(ctx, args)
-						return err
+						if err != nil {
+							return err
+						}
+
+						// Post-process playlist for LLHLS to fix init file URI
+						if config.Format == "hls" && config.LLHLS {
+							err = p.fixInitFileURI(fullOutputPath, outputDir)
+							if err != nil {
+								p.logger.Warn("Failed to fix init file URI in playlist", zap.Error(err))
+								// Don't fail the whole operation, just log warning
+							}
+						}
+
+						return nil
 					})
 					if err != nil {
 						p.logger.Error("Packaging failed after retries",
@@ -269,6 +308,42 @@ func (p *Packager) createMasterPlaylist(ctx context.Context, packageResults []Pa
 		zap.Int("variants", len(sortedVariants)))
 
 	return masterPlaylistPath, nil
+}
+
+// fixInitFileURI rewrites the playlist to use relative URI for init.mp4
+func (p *Packager) fixInitFileURI(playlistPath, outputDir string) error {
+	// Read the playlist file
+	content, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return fmt.Errorf("failed to read playlist: %w", err)
+	}
+
+	// Replace absolute path with relative filename in #EXT-X-MAP:URI
+	// Example: #EXT-X-MAP:URI="outputs\1763583192\1080\package\init.mp4"
+	//       -> #EXT-X-MAP:URI="init.mp4"
+	playlistStr := string(content)
+
+	// Convert outputDir to use forward slashes for consistency
+	outputDirClean := filepath.ToSlash(outputDir)
+
+	// Replace both forward and backslash versions
+	playlistStr = strings.ReplaceAll(playlistStr, fmt.Sprintf(`URI="%s/init.mp4"`, outputDirClean), `URI="init.mp4"`)
+	playlistStr = strings.ReplaceAll(playlistStr, fmt.Sprintf(`URI="%s\init.mp4"`, outputDir), `URI="init.mp4"`)
+
+	// Also handle case where it might be an absolute path starting with ./
+	playlistStr = strings.ReplaceAll(playlistStr, fmt.Sprintf(`URI="./%s/init.mp4"`, outputDirClean), `URI="init.mp4"`)
+
+	// Write back the modified playlist
+	err = os.WriteFile(playlistPath, []byte(playlistStr), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write playlist: %w", err)
+	}
+
+	p.logger.Info("Fixed init file URI in playlist",
+		zap.String("playlist", playlistPath),
+		zap.String("output_dir", outputDir))
+
+	return nil
 }
 
 // extractResolutionFromPackagePath extracts resolution from package output path

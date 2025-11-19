@@ -48,6 +48,15 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Read the entire file into memory before passing to goroutine
+	// This prevents "file already closed" errors when the handler returns
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		h.logger.Error("Failed to read file data", zap.Error(err))
+		http.Error(w, "Failed to read file data", http.StatusInternalServerError)
+		return
+	}
+
 	// Get key from form (or use default)
 	key := r.FormValue("key")
 	if key == "" {
@@ -68,8 +77,8 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start workflow asynchronously
-	go h.processVideo(createdJob.ID, file, key, bucket, epochTime)
+	// Start workflow asynchronously with file data buffer
+	go h.processVideo(createdJob.ID, fileData, key, bucket, epochTime)
 
 	// Return job ID immediately
 	w.Header().Set("Content-Type", "application/json")
@@ -86,7 +95,7 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // processVideo executes the video processing workflow asynchronously
-func (h *ProcessHandler) processVideo(jobID uuid.UUID, file io.Reader, key, bucket string, epochTime int64) {
+func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, bucket string, epochTime int64) {
 	ctx := context.Background()
 
 	// Emit initial progress
@@ -97,7 +106,7 @@ func (h *ProcessHandler) processVideo(jobID uuid.UUID, file io.Reader, key, buck
 
 	// Create workflow input
 	workflowInput := pipeline.WorkflowInput{
-		File:      file,
+		FileData:  fileData,
 		JobID:     jobID,
 		Key:       key,
 		Bucket:    bucket,
