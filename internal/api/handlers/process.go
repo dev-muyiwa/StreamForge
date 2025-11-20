@@ -32,8 +32,9 @@ func NewProcessHandler(jobManager *job.Manager, temporalWorkflow *pipeline.Tempo
 
 // Handle processes the video upload and returns a job ID immediately
 func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	// Parse multipart form
-	err := r.ParseMultipartForm(100 << 20) // 100 MB max
+	// Parse multipart form with generous limit for video files
+	// 1 GB = 1024 MB = 1024 * 1024 * 1024 bytes
+	err := r.ParseMultipartForm(1024 << 20) // 1 GB max
 	if err != nil {
 		h.logger.Error("Failed to parse multipart form", zap.Error(err))
 		http.Error(w, "Failed to parse form data", http.StatusBadRequest)

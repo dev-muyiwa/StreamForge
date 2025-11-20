@@ -54,8 +54,8 @@ func (s *Server) setupMiddleware() {
 	// Request logger (using built-in logger)
 	s.router.Use(middleware.Logger)
 
-	// Timeout
-	s.router.Use(middleware.Timeout(60 * time.Second))
+	// Note: Timeout middleware removed from global scope
+	// Applied per-route instead (see setupRoutes)
 
 	// CORS
 	s.router.Use(cors.Handler(cors.Options{
@@ -74,19 +74,23 @@ func (s *Server) setupRoutes() {
 	jobsHandler := handlers.NewJobsHandler(s.jobManager, s.logger)
 	streamHandler := handlers.NewStreamHandler(s.jobManager, s.logger)
 
-	// Health check
-	s.router.Get("/health", s.handleHealth)
+	// Health check with short timeout
+	s.router.With(middleware.Timeout(10*time.Second)).Get("/health", s.handleHealth)
 
-	// Video processing endpoints
+	// Video processing endpoint - NO timeout (handles large file uploads)
+	// The handler returns immediately with job ID, so timeout isn't needed
 	s.router.Post("/process", processHandler.Handle)
 
-	// Job status endpoints
-	s.router.Get("/jobs/{id}", jobsHandler.GetJob)
+	// Job status endpoints with reasonable timeout
+	s.router.With(middleware.Timeout(30*time.Second)).Get("/jobs/{id}", jobsHandler.GetJob)
+
+	// SSE streaming endpoint - NO timeout (long-lived connection)
 	s.router.Get("/jobs/{id}/stream", streamHandler.StreamProgress)
 
 	// Serve static HLS/DASH files from outputs directory
+	// Longer timeout for large video segments
 	fileServer := http.FileServer(http.Dir("./outputs"))
-	s.router.Handle("/outputs/*", http.StripPrefix("/outputs", fileServer))
+	s.router.With(middleware.Timeout(5*time.Minute)).Handle("/outputs/*", http.StripPrefix("/outputs", fileServer))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -101,11 +105,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) Start(addr string) error {
 	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:    addr,
+		Handler: s.router,
+		// Long timeouts to support large file uploads
+		ReadTimeout:       10 * time.Minute, // Reading large video files
+		WriteTimeout:      10 * time.Minute, // Writing responses (including SSE streams)
+		IdleTimeout:       2 * time.Minute,  // Keep-alive connections
+		MaxHeaderBytes:    1 << 20,          // 1 MB max header size
+		ReadHeaderTimeout: 30 * time.Second, // Prevent slowloris attacks
 	}
 
 	s.logger.Info("Starting HTTP server", zap.String("addr", addr))
