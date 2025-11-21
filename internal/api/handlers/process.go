@@ -67,6 +67,58 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	bucket := "input"
 	epochTime := time.Now().Unix()
 
+	// Parse optional fields
+	var resolutions []int
+	var isLLHLSEnabled *bool
+	var segmentDuration *int
+
+	// Parse resolutions (JSON array)
+	if resolutionsStr := r.FormValue("resolutions"); resolutionsStr != "" {
+		if err := json.Unmarshal([]byte(resolutionsStr), &resolutions); err != nil {
+			h.logger.Error("Failed to parse resolutions", zap.Error(err))
+			http.Error(w, "Invalid resolutions format (expected JSON array)", http.StatusBadRequest)
+			return
+		}
+		// Validate resolutions
+		validResolutions := []int{144, 240, 360, 480, 540, 720, 1080}
+		for _, res := range resolutions {
+			valid := false
+			for _, vr := range validResolutions {
+				if res == vr {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				h.logger.Error("Invalid resolution", zap.Int("resolution", res))
+				http.Error(w, fmt.Sprintf("Invalid resolution: %d (valid: 144, 240, 360, 480, 540, 720, 1080)", res), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// Parse is_ll_hls_enabled (boolean)
+	if llhlsStr := r.FormValue("is_ll_hls_enabled"); llhlsStr != "" {
+		llhlsEnabled := llhlsStr == "true" || llhlsStr == "1"
+		isLLHLSEnabled = &llhlsEnabled
+	}
+
+	// Parse segment_duration_in_seconds (integer with max 20)
+	if segmentStr := r.FormValue("segment_duration_in_seconds"); segmentStr != "" {
+		var segmentDur int
+		if _, err := fmt.Sscanf(segmentStr, "%d", &segmentDur); err != nil {
+			h.logger.Error("Failed to parse segment_duration_in_seconds", zap.Error(err))
+			http.Error(w, "Invalid segment_duration_in_seconds format (expected integer)", http.StatusBadRequest)
+			return
+		}
+		if segmentDur > 20 {
+			h.logger.Error("segment_duration_in_seconds exceeds maximum", zap.Int("value", segmentDur))
+			http.Error(w, "segment_duration_in_seconds must be <= 20", http.StatusBadRequest)
+			return
+		}
+		segmentDuration = &segmentDur
+	}
+
 	// Create workflow ID
 	workflowID := fmt.Sprintf("video-processing-%s-%d", key, epochTime)
 
@@ -78,8 +130,8 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start workflow asynchronously with file data buffer
-	go h.processVideo(createdJob.ID, fileData, key, bucket, epochTime)
+	// Start workflow asynchronously with file data buffer and optional settings
+	go h.processVideo(createdJob.ID, fileData, key, bucket, epochTime, resolutions, isLLHLSEnabled, segmentDuration)
 
 	// Return job ID immediately
 	w.Header().Set("Content-Type", "application/json")
@@ -96,7 +148,7 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // processVideo executes the video processing workflow asynchronously
-func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, bucket string, epochTime int64) {
+func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, bucket string, epochTime int64, customResolutions []int, isLLHLSEnabled *bool, segmentDuration *int) {
 	ctx := context.Background()
 
 	// Emit initial progress
@@ -107,11 +159,14 @@ func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, buc
 
 	// Create workflow input
 	workflowInput := pipeline.WorkflowInput{
-		FileData:  fileData,
-		JobID:     jobID,
-		Key:       key,
-		Bucket:    bucket,
-		EpochTime: epochTime,
+		FileData:        fileData,
+		JobID:           jobID,
+		Key:             key,
+		Bucket:          bucket,
+		EpochTime:       epochTime,
+		Resolutions:     customResolutions,
+		IsLLHLSEnabled:  isLLHLSEnabled,
+		SegmentDuration: segmentDuration,
 	}
 
 	// Execute Temporal workflow

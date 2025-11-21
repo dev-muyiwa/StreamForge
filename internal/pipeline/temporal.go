@@ -4,6 +4,7 @@ import (
 	"StreamForge/internal/config"
 	"StreamForge/internal/job"
 	"StreamForge/internal/pipeline/storage"
+	types "StreamForge/pkg"
 	"context"
 	"fmt"
 	"os"
@@ -34,11 +35,14 @@ type TemporalWorkflow struct {
 
 // WorkflowInput represents the input for the video processing workflow
 type WorkflowInput struct {
-	FileData  []byte    `json:"-"` // Byte slice instead of io.Reader to prevent "file already closed" errors
-	JobID     uuid.UUID `json:"job_id"`
-	Key       string    `json:"key"`
-	Bucket    string    `json:"bucket"`
-	EpochTime int64     `json:"epoch_time"`
+	FileData        []byte    `json:"-"` // Byte slice instead of io.Reader to prevent "file already closed" errors
+	JobID           uuid.UUID `json:"job_id"`
+	Key             string    `json:"key"`
+	Bucket          string    `json:"bucket"`
+	EpochTime       int64     `json:"epoch_time"`
+	Resolutions     []int     `json:"resolutions,omitempty"`       // Optional: custom resolutions (144, 240, 360, 480, 540, 720, 1080)
+	IsLLHLSEnabled  *bool     `json:"is_ll_hls_enabled,omitempty"` // Optional: enable/disable LL-HLS
+	SegmentDuration *int      `json:"segment_duration,omitempty"`  // Optional: segment duration in seconds (max 20)
 }
 
 // WorkflowOutput represents the output of the video processing workflow
@@ -53,21 +57,24 @@ type WorkflowOutput struct {
 
 // ActivityInput represents input for activities
 type ActivityInput struct {
-	JobID      uuid.UUID `json:"job_id"`
-	FilePath   string    `json:"file_path"`
-	Key        string    `json:"key"`
-	Bucket     string    `json:"bucket"`
-	EpochTime  int64     `json:"epoch_time"`
-	Resolution string    `json:"resolution,omitempty"`
+	JobID       uuid.UUID `json:"job_id"`
+	FilePath    string    `json:"file_path"`
+	Key         string    `json:"key"`
+	Bucket      string    `json:"bucket"`
+	EpochTime   int64     `json:"epoch_time"`
+	Resolution  string    `json:"resolution,omitempty"`
+	Resolutions []int     `json:"resolutions,omitempty"` // Optional custom resolutions
 }
 
 // PackageInput represents input for package activity
 type PackageInput struct {
-	JobID     uuid.UUID `json:"job_id"`
-	FilePaths []string  `json:"file_paths"`
-	Key       string    `json:"key"`
-	Bucket    string    `json:"bucket"`
-	EpochTime int64     `json:"epoch_time"`
+	JobID           uuid.UUID `json:"job_id"`
+	FilePaths       []string  `json:"file_paths"`
+	Key             string    `json:"key"`
+	Bucket          string    `json:"bucket"`
+	EpochTime       int64     `json:"epoch_time"`
+	IsLLHLSEnabled  *bool     `json:"is_ll_hls_enabled,omitempty"`
+	SegmentDuration *int      `json:"segment_duration,omitempty"`
 }
 
 // ActivityOutput represents output from activities
@@ -272,10 +279,11 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 	transcodeCtx := workflow.WithActivityOptions(ctx, transcodeOptions)
 
 	transcodeInput := ActivityInput{
-		JobID:     input.JobID,
-		FilePath:  localFilePath,
-		Key:       input.Key,
-		EpochTime: input.EpochTime,
+		JobID:       input.JobID,
+		FilePath:    localFilePath,
+		Key:         input.Key,
+		EpochTime:   input.EpochTime,
+		Resolutions: input.Resolutions, // Pass custom resolutions if provided
 	}
 
 	var transcodeResults []TranscodeResult
@@ -373,11 +381,13 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 
 	// Step 5: Package all successful transcodes together
 	packageInput := PackageInput{
-		JobID:     input.JobID,
-		FilePaths: transcodeOutputs,
-		Key:       input.Key,
-		EpochTime: input.EpochTime,
-		Bucket:    input.Bucket,
+		JobID:           input.JobID,
+		FilePaths:       transcodeOutputs,
+		Key:             input.Key,
+		EpochTime:       input.EpochTime,
+		Bucket:          input.Bucket,
+		IsLLHLSEnabled:  input.IsLLHLSEnabled,  // Pass custom LL-HLS setting if provided
+		SegmentDuration: input.SegmentDuration, // Pass custom segment duration if provided
 	}
 
 	// Package options (medium timeout for packaging)
@@ -504,17 +514,25 @@ func (a *Activities) SaveFileLocallyActivity(ctx context.Context, input Activity
 func (a *Activities) TranscodeActivity(ctx context.Context, input ActivityInput) ([]TranscodeResult, error) {
 	logger := activity.GetLogger(ctx)
 
-	logger.Info("Starting transcoding activity", "input", input.FilePath, "epoch_time", input.EpochTime)
+	logger.Info("Starting transcoding activity", "input", input.FilePath, "epoch_time", input.EpochTime, "custom_resolutions", input.Resolutions)
 
 	// Emit progress: starting transcoding
 	if a.jobManager != nil {
 		a.jobManager.EmitProgress(ctx, input.JobID, job.StageTranscoding, 20, "Initializing video transcoding", nil)
 	}
 
-	totalResolutions := len(a.config.Transcode)
+	// Determine which transcode configs to use
+	transcodeConfigs := a.config.Transcode
+	if len(input.Resolutions) > 0 {
+		// Build custom transcode configs from provided resolutions
+		transcodeConfigs = buildTranscodeConfigs(input.Resolutions)
+		logger.Info("Using custom resolutions", "resolutions", input.Resolutions, "configs", len(transcodeConfigs))
+	}
+
+	totalResolutions := len(transcodeConfigs)
 
 	// Use the actual transcoder to transcode the video
-	transcodeResults, err := a.transcoder.Transcode(ctx, input.FilePath, a.config.Transcode, input.EpochTime)
+	transcodeResults, err := a.transcoder.Transcode(ctx, input.FilePath, transcodeConfigs, input.EpochTime)
 	if err != nil {
 		logger.Error("Transcoding failed", "error", err)
 		// Return partial results if available
@@ -618,15 +636,24 @@ func (a *Activities) VMAFValidationActivity(ctx context.Context, input ActivityI
 func (a *Activities) PackageActivity(ctx context.Context, input PackageInput) ([]PackageResult, error) {
 	logger := activity.GetLogger(ctx)
 
-	logger.Info("Starting packaging activity", "inputs", len(input.FilePaths), "epoch_time", input.EpochTime)
+	logger.Info("Starting packaging activity", "inputs", len(input.FilePaths), "epoch_time", input.EpochTime,
+		"custom_llhls", input.IsLLHLSEnabled, "custom_segment_duration", input.SegmentDuration)
 
 	// Emit progress: starting packaging
 	if a.jobManager != nil {
 		a.jobManager.EmitProgress(ctx, input.JobID, job.StagePackaging, 65, "Preparing video packaging", nil)
 	}
 
+	// Determine which package configs to use
+	packageConfigs := a.config.Package
+	if input.IsLLHLSEnabled != nil || input.SegmentDuration != nil {
+		// Build custom package configs from provided settings
+		packageConfigs = buildPackageConfigs(a.config.Package, input.IsLLHLSEnabled, input.SegmentDuration)
+		logger.Info("Using custom package settings", "configs", len(packageConfigs))
+	}
+
 	// Use the actual packager to package the videos
-	packageResults, err := a.packager.Package(ctx, input.FilePaths, a.config.Package, input.EpochTime)
+	packageResults, err := a.packager.Package(ctx, input.FilePaths, packageConfigs, input.EpochTime)
 	if err != nil {
 		logger.Error("Packaging failed", "error", err)
 		// Return partial results if available
@@ -780,4 +807,57 @@ func (a *Activities) StoreActivity(ctx context.Context, input ActivityInput) (St
 		Key:   storageKey,
 		Error: nil,
 	}, nil
+}
+
+// buildTranscodeConfigs creates codec configurations from resolution values
+func buildTranscodeConfigs(resolutions []int) []types.CodecConfig {
+	// Define recommended bitrates for each resolution
+	bitrateMap := map[int]string{
+		144:  "100k",
+		240:  "200k",
+		360:  "250k",
+		480:  "500k",
+		540:  "800k",
+		720:  "1000k",
+		1080: "1500k",
+	}
+
+	configs := make([]types.CodecConfig, 0, len(resolutions))
+	for _, res := range resolutions {
+		bitrate, ok := bitrateMap[res]
+		if !ok {
+			// Default bitrate if resolution not in map
+			bitrate = "500k"
+		}
+
+		configs = append(configs, types.CodecConfig{
+			Codec:      "libx264",
+			Bitrate:    bitrate,
+			Resolution: fmt.Sprintf("%d", res),
+		})
+	}
+
+	return configs
+}
+
+// buildPackageConfigs creates package configurations from optional settings
+func buildPackageConfigs(defaultConfigs []types.PackageConfig, isLLHLSEnabled *bool, segmentDuration *int) []types.PackageConfig {
+	configs := make([]types.PackageConfig, len(defaultConfigs))
+
+	for i, cfg := range defaultConfigs {
+		// Copy the default config
+		configs[i] = cfg
+
+		// Override LLHLS setting if provided
+		if isLLHLSEnabled != nil {
+			configs[i].LLHLS = *isLLHLSEnabled
+		}
+
+		// Override segment duration if provided
+		if segmentDuration != nil {
+			configs[i].SegmentDuration = *segmentDuration
+		}
+	}
+
+	return configs
 }
