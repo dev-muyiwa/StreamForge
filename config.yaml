@@ -40,7 +40,16 @@ package:
     llhls: true
     output_path: "playlist.m3u8"
 
-plugins: []
+plugins:
+  - name: "watermark"
+    enabled: true
+    config:
+      text: "StreamForge"
+      position: "bottom-right"
+      font_size: 24
+      font_color: "white"
+      alpha: 0.8
+      padding: 10
 
 logging:
   level: "info"

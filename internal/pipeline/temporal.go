@@ -5,6 +5,9 @@ import (
 	"StreamForge/internal/job"
 	"StreamForge/internal/pipeline/storage"
 	types "StreamForge/pkg"
+	"StreamForge/pkg/ffmpeg"
+	"StreamForge/pkg/plugin"
+	"StreamForge/pkg/plugin/watermark"
 	"context"
 	"fmt"
 	"os"
@@ -35,14 +38,15 @@ type TemporalWorkflow struct {
 
 // WorkflowInput represents the input for the video processing workflow
 type WorkflowInput struct {
-	FileData        []byte    `json:"-"` // Byte slice instead of io.Reader to prevent "file already closed" errors
-	JobID           uuid.UUID `json:"job_id"`
-	Key             string    `json:"key"`
-	Bucket          string    `json:"bucket"`
-	EpochTime       int64     `json:"epoch_time"`
-	Resolutions     []int     `json:"resolutions,omitempty"`       // Optional: custom resolutions (144, 240, 360, 480, 540, 720, 1080)
-	IsLLHLSEnabled  *bool     `json:"is_ll_hls_enabled,omitempty"` // Optional: enable/disable LL-HLS
-	SegmentDuration *int      `json:"segment_duration,omitempty"`  // Optional: segment duration in seconds (max 20)
+	FileData        []byte               `json:"-"` // Byte slice instead of io.Reader to prevent "file already closed" errors
+	JobID           uuid.UUID            `json:"job_id"`
+	Key             string               `json:"key"`
+	Bucket          string               `json:"bucket"`
+	EpochTime       int64                `json:"epoch_time"`
+	Resolutions     []int                `json:"resolutions,omitempty"`       // Optional: custom resolutions (144, 240, 360, 480, 540, 720, 1080)
+	IsLLHLSEnabled  *bool                `json:"is_ll_hls_enabled,omitempty"` // Optional: enable/disable LL-HLS
+	SegmentDuration *int                 `json:"segment_duration,omitempty"`  // Optional: segment duration in seconds (max 20)
+	PluginConfigs   []types.PluginConfig `json:"plugin_configs,omitempty"`    // Optional: per-request plugin overrides
 }
 
 // WorkflowOutput represents the output of the video processing workflow
@@ -57,13 +61,14 @@ type WorkflowOutput struct {
 
 // ActivityInput represents input for activities
 type ActivityInput struct {
-	JobID       uuid.UUID `json:"job_id"`
-	FilePath    string    `json:"file_path"`
-	Key         string    `json:"key"`
-	Bucket      string    `json:"bucket"`
-	EpochTime   int64     `json:"epoch_time"`
-	Resolution  string    `json:"resolution,omitempty"`
-	Resolutions []int     `json:"resolutions,omitempty"` // Optional custom resolutions
+	JobID         uuid.UUID            `json:"job_id"`
+	FilePath      string               `json:"file_path"`
+	Key           string               `json:"key"`
+	Bucket        string               `json:"bucket"`
+	EpochTime     int64                `json:"epoch_time"`
+	Resolution    string               `json:"resolution,omitempty"`
+	Resolutions   []int                `json:"resolutions,omitempty"`    // Optional custom resolutions
+	PluginConfigs []types.PluginConfig `json:"plugin_configs,omitempty"` // Optional plugin configurations
 }
 
 // PackageInput represents input for package activity
@@ -124,6 +129,7 @@ func (tw *TemporalWorkflow) StartWorker() error {
 	// Register workflow and activities
 	tw.worker.RegisterWorkflow(VideoProcessingWorkflow)
 	tw.worker.RegisterActivity(activities.SaveFileLocallyActivity)
+	tw.worker.RegisterActivity(activities.PluginActivity)
 	tw.worker.RegisterActivity(activities.TranscodeActivity)
 	tw.worker.RegisterActivity(activities.VMAFValidationActivity)
 	tw.worker.RegisterActivity(activities.PackageActivity)
@@ -266,6 +272,27 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 
 	localFilePath := saveFileOutput.FilePath
 	logger.Info("File saved locally", "path", localFilePath)
+
+	// Step 1.5: Apply plugins if enabled
+	pluginInput := ActivityInput{
+		JobID:         input.JobID,
+		FilePath:      localFilePath,
+		Key:           input.Key,
+		EpochTime:     input.EpochTime,
+		PluginConfigs: input.PluginConfigs,
+	}
+
+	var pluginOutput ActivityOutput
+	err = workflow.ExecuteActivity(ctx, "PluginActivity", pluginInput).Get(ctx, &pluginOutput)
+	if err != nil {
+		return result, fmt.Errorf("plugin processing failed: %w", err)
+	}
+
+	// Update file path if plugins modified it
+	if pluginOutput.FilePath != "" {
+		localFilePath = pluginOutput.FilePath
+		logger.Info("Plugins applied", "output_path", localFilePath)
+	}
 
 	// Step 2: Transcode video (longer timeout for video processing)
 	transcodeOptions := workflow.ActivityOptions{
@@ -465,13 +492,14 @@ func VideoProcessingWorkflow(ctx workflow.Context, input WorkflowInput) (Workflo
 
 // Activities holds dependencies for Temporal activities
 type Activities struct {
-	transcoder *Transcoder
-	packager   *Packager
-	monitor    *Monitor
-	storage    storage.Storage
-	config     *config.Config
-	logger     *zap.Logger
-	jobManager *job.Manager
+	transcoder     *Transcoder
+	packager       *Packager
+	monitor        *Monitor
+	storage        storage.Storage
+	config         *config.Config
+	logger         *zap.Logger
+	jobManager     *job.Manager
+	pluginRegistry *plugin.Registry
 }
 
 // NewActivities creates a new Activities instance
@@ -484,14 +512,25 @@ func NewActivities(
 	logger *zap.Logger,
 	jobManager *job.Manager,
 ) *Activities {
+	// Initialize plugin registry
+	pluginRegistry := plugin.NewRegistry()
+
+	// Register watermark plugin
+	ffmpegClient := ffmpeg.NewFFmpeg(config.Pipeline.FFMpegPath)
+	watermarkPlugin := watermark.NewWatermarkPlugin(ffmpegClient, logger, config.Pipeline.Retry)
+	if err := pluginRegistry.Register(watermarkPlugin); err != nil {
+		logger.Error("Failed to register watermark plugin", zap.Error(err))
+	}
+
 	return &Activities{
-		transcoder: transcoder,
-		packager:   packager,
-		monitor:    monitor,
-		storage:    storage,
-		config:     config,
-		logger:     logger,
-		jobManager: jobManager,
+		transcoder:     transcoder,
+		packager:       packager,
+		monitor:        monitor,
+		storage:        storage,
+		config:         config,
+		logger:         logger,
+		jobManager:     jobManager,
+		pluginRegistry: pluginRegistry,
 	}
 }
 
@@ -508,6 +547,78 @@ func (a *Activities) SaveFileLocallyActivity(ctx context.Context, input Activity
 
 	logger.Info("File already saved locally", "path", localFilePath)
 	return ActivityOutput{FilePath: localFilePath}, nil
+}
+
+// PluginActivity applies all enabled plugins to the video
+func (a *Activities) PluginActivity(ctx context.Context, input ActivityInput) (ActivityOutput, error) {
+	logger := activity.GetLogger(ctx)
+
+	// Merge global config with per-request overrides
+	mergedConfigs := a.mergePluginConfigs(input.PluginConfigs)
+
+	// Check if there are any enabled plugins
+	if !a.hasEnabledPlugins(mergedConfigs) {
+		logger.Info("No enabled plugins, skipping plugin processing")
+		return ActivityOutput{FilePath: input.FilePath}, nil
+	}
+
+	logger.Info("Starting plugin activity", "input", input.FilePath, "plugins", len(mergedConfigs))
+
+	// Create plugin processor
+	processor := NewPluginProcessor(a.pluginRegistry, mergedConfigs, a.logger)
+
+	// Process plugins
+	return processor.ProcessPlugins(ctx, input)
+}
+
+// mergePluginConfigs merges global config with per-request overrides
+func (a *Activities) mergePluginConfigs(requestConfigs []types.PluginConfig) []types.PluginConfig {
+	// If no request configs provided, use global config
+	if len(requestConfigs) == 0 {
+		return a.config.Plugins
+	}
+
+	// Create a map of request configs by name for easy lookup
+	requestMap := make(map[string]types.PluginConfig)
+	for _, rc := range requestConfigs {
+		requestMap[rc.Name] = rc
+	}
+
+	// Start with global config and override with request config if present
+	merged := make([]types.PluginConfig, 0)
+	processedNames := make(map[string]bool)
+
+	// First, process global configs
+	for _, globalConfig := range a.config.Plugins {
+		if requestConfig, exists := requestMap[globalConfig.Name]; exists {
+			// Request override exists, use it
+			merged = append(merged, requestConfig)
+			processedNames[globalConfig.Name] = true
+		} else {
+			// No override, use global config
+			merged = append(merged, globalConfig)
+			processedNames[globalConfig.Name] = true
+		}
+	}
+
+	// Add any request configs that weren't in global config
+	for _, requestConfig := range requestConfigs {
+		if !processedNames[requestConfig.Name] {
+			merged = append(merged, requestConfig)
+		}
+	}
+
+	return merged
+}
+
+// hasEnabledPlugins checks if there are any enabled plugins in the config
+func (a *Activities) hasEnabledPlugins(configs []types.PluginConfig) bool {
+	for _, config := range configs {
+		if config.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 // TranscodeActivity handles video transcoding using the existing transcoder

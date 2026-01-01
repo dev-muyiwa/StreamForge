@@ -38,6 +38,25 @@ func (f *FFmpeg) Transcode(ctx context.Context, inputFile string, config types.C
 	return f.Exec(ctx, args)
 }
 
+// ApplyFilter applies a video filter to the input file
+func (f *FFmpeg) ApplyFilter(ctx context.Context, inputFile, outputFile, filter string) (string, error) {
+	// Ensure output directory exists
+	outputDir := filepath.Dir(outputFile)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	args := []string{
+		"-i", inputFile,
+		"-vf", filter,
+		"-c:a", "copy", // Don't re-encode audio
+		"-y",
+		outputFile,
+	}
+
+	return f.Exec(ctx, args)
+}
+
 func (f *FFmpeg) Exec(ctx context.Context, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, f.pathToBinary, args...)
 

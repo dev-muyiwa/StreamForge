@@ -3,6 +3,7 @@ package handlers
 import (
 	"StreamForge/internal/job"
 	"StreamForge/internal/pipeline"
+	types "StreamForge/pkg"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -119,6 +120,16 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		segmentDuration = &segmentDur
 	}
 
+	// Parse plugins (JSON array)
+	var pluginConfigs []types.PluginConfig
+	if pluginsStr := r.FormValue("plugins"); pluginsStr != "" {
+		if err := json.Unmarshal([]byte(pluginsStr), &pluginConfigs); err != nil {
+			h.logger.Error("Failed to parse plugins", zap.Error(err))
+			http.Error(w, "Invalid plugins format (expected JSON array)", http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Create workflow ID
 	workflowID := fmt.Sprintf("video-processing-%s-%d", key, epochTime)
 
@@ -131,7 +142,7 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start workflow asynchronously with file data buffer and optional settings
-	go h.processVideo(createdJob.ID, fileData, key, bucket, epochTime, resolutions, isLLHLSEnabled, segmentDuration)
+	go h.processVideo(createdJob.ID, fileData, key, bucket, epochTime, resolutions, isLLHLSEnabled, segmentDuration, pluginConfigs)
 
 	// Return job ID immediately
 	w.Header().Set("Content-Type", "application/json")
@@ -148,7 +159,7 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // processVideo executes the video processing workflow asynchronously
-func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, bucket string, epochTime int64, customResolutions []int, isLLHLSEnabled *bool, segmentDuration *int) {
+func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, bucket string, epochTime int64, customResolutions []int, isLLHLSEnabled *bool, segmentDuration *int, pluginConfigs []types.PluginConfig) {
 	ctx := context.Background()
 
 	// Emit initial progress
@@ -167,6 +178,7 @@ func (h *ProcessHandler) processVideo(jobID uuid.UUID, fileData []byte, key, buc
 		Resolutions:     customResolutions,
 		IsLLHLSEnabled:  isLLHLSEnabled,
 		SegmentDuration: segmentDuration,
+		PluginConfigs:   pluginConfigs,
 	}
 
 	// Execute Temporal workflow

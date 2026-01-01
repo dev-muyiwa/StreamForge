@@ -5,9 +5,11 @@ import (
 	"StreamForge/internal/pipeline/storage"
 	types "StreamForge/pkg"
 	"context"
+	"fmt"
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -43,9 +45,16 @@ func (c *Client) PackageVideo(ctx context.Context, inputFiles []string, configs 
 }
 
 func (c *Client) RunWorkflow(ctx context.Context, inputFile io.Reader, bucket, key string) (*pipeline.WorkflowOutput, error) {
+	// Read file data into memory
+	fileData, err := io.ReadAll(inputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file data: %w", err)
+	}
+
 	// Create workflow input
 	workflowInput := pipeline.WorkflowInput{
-		File:      inputFile,
+		FileData:  fileData,
+		JobID:     uuid.New(),
 		Key:       key,
 		Bucket:    bucket,
 		EpochTime: time.Now().Unix(),
