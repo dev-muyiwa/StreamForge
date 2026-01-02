@@ -41,15 +41,31 @@ package:
     output_path: "playlist.m3u8"
 
 plugins:
+  # Text watermark (default)
   - name: "watermark"
     enabled: true
     config:
+      type: "text"  # or "image"
       text: "StreamForge"
-      position: "bottom-right"
+      position: "bottom-right"  # top-left, top-right, bottom-left, bottom-right
       font_size: 24
       font_color: "white"
-      alpha: 0.8
-      padding: 10
+      alpha: 0.8  # 0.0 (transparent) to 1.0 (opaque)
+      padding: 10  # pixels from edge
+
+  # Image watermark example (commented out)
+  # - name: "watermark"
+  #   enabled: true
+  #   config:
+  #     type: "image"
+  #     image_path: "./assets/logo.png"  # Path to watermark image
+  #     position: "bottom-right"
+  #     alpha: 0.8
+  #     padding: 10
+  #     image_scale: 0.1  # Scale to 10% of video size
+  #     # OR specify exact dimensions:
+  #     # image_width: 200
+  #     # image_height: 100
 
 logging:
   level: "info"

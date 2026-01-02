@@ -65,13 +65,6 @@ func (p *WatermarkPlugin) Execute(ctx context.Context, input plugin.PluginInput)
 		return plugin.PluginOutput{}, fmt.Errorf("invalid watermark config: %w", err)
 	}
 
-	p.logger.Info("Applying watermark",
-		zap.String("text", config.Text),
-		zap.String("position", config.Position),
-		zap.Int("font_size", config.FontSize),
-		zap.String("font_color", config.FontColor),
-		zap.Float64("alpha", config.Alpha))
-
 	// Create output directory
 	outputDir := filepath.Join("./plugins", "watermark", fmt.Sprintf("%d", input.EpochTime))
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -81,21 +74,29 @@ func (p *WatermarkPlugin) Execute(ctx context.Context, input plugin.PluginInput)
 	// Create output file path
 	outputFile := filepath.Join(outputDir, filepath.Base(input.FilePath))
 
-	// Build FFmpeg filter
-	filter, err := p.buildWatermarkFilter(config)
-	if err != nil {
-		return plugin.PluginOutput{}, fmt.Errorf("failed to build watermark filter: %w", err)
-	}
-
-	p.logger.Info("Applying watermark filter", zap.String("filter", filter), zap.String("output", outputFile))
-
-	// Apply watermark using FFmpeg with retry logic
+	// Apply watermark based on type
 	var result string
-	err = Retry(ctx, p.logger, p.retry, "apply watermark", func() error {
-		var retryErr error
-		result, retryErr = p.ffmpeg.ApplyFilter(ctx, input.FilePath, outputFile, filter)
-		return retryErr
-	})
+	var err error
+
+	if config.Type == "text" {
+		p.logger.Info("Applying text watermark",
+			zap.String("text", config.Text),
+			zap.String("position", config.Position),
+			zap.Int("font_size", config.FontSize),
+			zap.String("font_color", config.FontColor),
+			zap.Float64("alpha", config.Alpha))
+
+		result, err = p.applyTextWatermark(ctx, input.FilePath, outputFile, config)
+	} else if config.Type == "image" {
+		p.logger.Info("Applying image watermark",
+			zap.String("image_path", config.ImagePath),
+			zap.String("position", config.Position),
+			zap.Float64("alpha", config.Alpha))
+
+		result, err = p.applyImageWatermark(ctx, input.FilePath, outputFile, config)
+	} else {
+		return plugin.PluginOutput{}, fmt.Errorf("unsupported watermark type: %s", config.Type)
+	}
 
 	if err != nil {
 		return plugin.PluginOutput{Error: err}, fmt.Errorf("failed to apply watermark: %w", err)
@@ -127,6 +128,103 @@ func (p *WatermarkPlugin) buildWatermarkFilter(config WatermarkConfig) (string, 
 		x,
 		y,
 	)
+
+	return filter, nil
+}
+
+// applyTextWatermark applies a text watermark using FFmpeg drawtext filter
+func (p *WatermarkPlugin) applyTextWatermark(ctx context.Context, inputFile, outputFile string, config WatermarkConfig) (string, error) {
+	// Build FFmpeg filter
+	filter, err := p.buildWatermarkFilter(config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build text watermark filter: %w", err)
+	}
+
+	p.logger.Info("Applying text watermark filter", zap.String("filter", filter), zap.String("output", outputFile))
+
+	// Apply watermark using FFmpeg with retry logic
+	var result string
+	err = Retry(ctx, p.logger, p.retry, "apply text watermark", func() error {
+		var retryErr error
+		result, retryErr = p.ffmpeg.ApplyFilter(ctx, inputFile, outputFile, filter)
+		return retryErr
+	})
+
+	return result, err
+}
+
+// applyImageWatermark applies an image watermark using FFmpeg overlay filter
+func (p *WatermarkPlugin) applyImageWatermark(ctx context.Context, inputFile, outputFile string, config WatermarkConfig) (string, error) {
+	// Validate image file exists
+	if _, err := os.Stat(config.ImagePath); err != nil {
+		return "", fmt.Errorf("watermark image not found: %w", err)
+	}
+
+	// Build FFmpeg overlay filter
+	filter, err := p.buildImageOverlayFilter(config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build image overlay filter: %w", err)
+	}
+
+	p.logger.Info("Applying image overlay filter", zap.String("filter", filter), zap.String("output", outputFile))
+
+	// Apply watermark using FFmpeg with retry logic
+	var result string
+	err = Retry(ctx, p.logger, p.retry, "apply image watermark", func() error {
+		var retryErr error
+		result, retryErr = p.ffmpeg.ApplyImageOverlay(ctx, inputFile, config.ImagePath, outputFile, filter)
+		return retryErr
+	})
+
+	return result, err
+}
+
+// buildImageOverlayFilter constructs the FFmpeg overlay filter for image watermark
+func (p *WatermarkPlugin) buildImageOverlayFilter(config WatermarkConfig) (string, error) {
+	// Get position expression for overlay
+	x, y := config.GetImagePositionExpression()
+
+	// Build scale filter if needed
+	var scaleFilter string
+	if config.ImageWidth > 0 && config.ImageHeight > 0 {
+		// Use specific dimensions
+		scaleFilter = fmt.Sprintf("scale=%d:%d", config.ImageWidth, config.ImageHeight)
+	} else if config.ImageWidth > 0 {
+		// Scale with specified width, maintain aspect ratio
+		scaleFilter = fmt.Sprintf("scale=%d:-1", config.ImageWidth)
+	} else if config.ImageHeight > 0 {
+		// Scale with specified height, maintain aspect ratio
+		scaleFilter = fmt.Sprintf("scale=-1:%d", config.ImageHeight)
+	} else if config.ImageScale > 0 {
+		// Scale as percentage of main video
+		scaleFilter = fmt.Sprintf("scale=iw*%.2f:ih*%.2f", config.ImageScale, config.ImageScale)
+	}
+
+	// Build alpha filter for transparency
+	var alphaFilter string
+	if config.Alpha < 1.0 {
+		alphaFilter = fmt.Sprintf("format=rgba,colorchannelmixer=aa=%.2f", config.Alpha)
+	}
+
+	// Combine filters
+	var overlayInput string
+	if scaleFilter != "" && alphaFilter != "" {
+		overlayInput = fmt.Sprintf("[1:v]%s,%s[wm]", scaleFilter, alphaFilter)
+	} else if scaleFilter != "" {
+		overlayInput = fmt.Sprintf("[1:v]%s[wm]", scaleFilter)
+	} else if alphaFilter != "" {
+		overlayInput = fmt.Sprintf("[1:v]%s[wm]", alphaFilter)
+	} else {
+		overlayInput = "[1:v]"
+	}
+
+	// Build final overlay filter
+	var filter string
+	if overlayInput != "[1:v]" {
+		filter = fmt.Sprintf("%s;[0:v][wm]overlay=%s:%s", overlayInput, x, y)
+	} else {
+		filter = fmt.Sprintf("overlay=%s:%s", x, y)
+	}
 
 	return filter, nil
 }

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -127,6 +129,68 @@ func (h *ProcessHandler) Handle(w http.ResponseWriter, r *http.Request) {
 			h.logger.Error("Failed to parse plugins", zap.Error(err))
 			http.Error(w, "Invalid plugins format (expected JSON array)", http.StatusBadRequest)
 			return
+		}
+	}
+
+	// Handle watermark image upload if provided
+	watermarkFile, watermarkHeader, err := r.FormFile("watermark_image")
+	if err == nil {
+		defer watermarkFile.Close()
+
+		// Read watermark image data
+		watermarkData, err := io.ReadAll(watermarkFile)
+		if err != nil {
+			h.logger.Error("Failed to read watermark image", zap.Error(err))
+			http.Error(w, "Failed to read watermark image", http.StatusInternalServerError)
+			return
+		}
+
+		// Create temporary directory for watermark
+		tempDir := filepath.Join("./temp/watermark", fmt.Sprintf("%d", epochTime))
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			h.logger.Error("Failed to create temp watermark directory", zap.Error(err))
+			http.Error(w, "Failed to save watermark image", http.StatusInternalServerError)
+			return
+		}
+
+		// Save watermark image to temp location
+		watermarkPath := filepath.Join(tempDir, watermarkHeader.Filename)
+		if err := os.WriteFile(watermarkPath, watermarkData, 0644); err != nil {
+			h.logger.Error("Failed to save watermark image", zap.Error(err))
+			http.Error(w, "Failed to save watermark image", http.StatusInternalServerError)
+			return
+		}
+
+		h.logger.Info("Watermark image uploaded", zap.String("path", watermarkPath))
+
+		// Update or create watermark plugin config with image path
+		foundWatermark := false
+		for i, plugin := range pluginConfigs {
+			if plugin.Name == "watermark" {
+				if plugin.Config == nil {
+					plugin.Config = make(map[string]interface{})
+				}
+				plugin.Config["image_path"] = watermarkPath
+				plugin.Config["type"] = "image"
+				pluginConfigs[i] = plugin
+				foundWatermark = true
+				break
+			}
+		}
+
+		// If no watermark plugin config exists, create one
+		if !foundWatermark {
+			pluginConfigs = append(pluginConfigs, types.PluginConfig{
+				Name:    "watermark",
+				Enabled: true,
+				Config: map[string]interface{}{
+					"type":       "image",
+					"image_path": watermarkPath,
+					"position":   "bottom-right",
+					"alpha":      0.8,
+					"padding":    10,
+				},
+			})
 		}
 	}
 

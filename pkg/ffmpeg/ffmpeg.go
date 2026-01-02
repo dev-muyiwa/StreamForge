@@ -57,6 +57,26 @@ func (f *FFmpeg) ApplyFilter(ctx context.Context, inputFile, outputFile, filter 
 	return f.Exec(ctx, args)
 }
 
+// ApplyImageOverlay applies an image overlay to the input video
+func (f *FFmpeg) ApplyImageOverlay(ctx context.Context, inputVideo, overlayImage, outputFile, filterComplex string) (string, error) {
+	// Ensure output directory exists
+	outputDir := filepath.Dir(outputFile)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	args := []string{
+		"-i", inputVideo,
+		"-i", overlayImage,
+		"-filter_complex", filterComplex,
+		"-c:a", "copy", // Don't re-encode audio
+		"-y",
+		outputFile,
+	}
+
+	return f.Exec(ctx, args)
+}
+
 func (f *FFmpeg) Exec(ctx context.Context, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, f.pathToBinary, args...)
 
